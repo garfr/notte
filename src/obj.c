@@ -9,7 +9,6 @@
 
 #include <notte/model.h>
 #include <notte/log.h>
-#include <notte/memory.h>
 
 /* === CONSTANTS === */
 
@@ -67,8 +66,10 @@ StaticVertEqual(Static_Vert v1, Static_Vert v2)
   return Vec3Equal(v1.pos, v2.pos) && Vec3Equal(v1.nor, v2.nor) 
     && Vec2Equal(v1.tex, v2.tex);
 }
+
 Err_Code 
-StaticModelLoadObj(Static_Model *model, 
+StaticModelLoadObj(Allocator alloc,
+                   Static_Model *model, 
                    Parse_Result *result, 
                    Membuf buf)
 {
@@ -76,21 +77,21 @@ StaticModelLoadObj(Static_Model *model,
   Size_Data size;
   usize nCmds = CountCmds(buf);
 
-  Obj_Cmd *cmds = MEMORY_NEW_ARR(Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
+  Obj_Cmd *cmds = NEW_ARR(alloc, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
 
   err = ParseCmds(buf, result, cmds, &size);
   if (err)
   {
-    MEMORY_FREE_ARR(cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
+    FREE_ARR(alloc, cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
     return err;
   }
 
-  Vec3 *pos = MEMORY_NEW_ARR(Vec3, size.nPos, MEMORY_TAG_ARRAY);
-  Vec3 *nor = MEMORY_NEW_ARR(Vec3, size.nNor, MEMORY_TAG_ARRAY);
-  Vec2 *tex = MEMORY_NEW_ARR(Vec2, size.nTex, MEMORY_TAG_ARRAY);
-  Static_Vert *verts = MEMORY_NEW_ARR(Static_Vert, size.nVerts, 
+  Vec3 *pos = NEW_ARR(alloc, Vec3, size.nPos, MEMORY_TAG_ARRAY);
+  Vec3 *nor = NEW_ARR(alloc, Vec3, size.nNor, MEMORY_TAG_ARRAY);
+  Vec2 *tex = NEW_ARR(alloc, Vec2, size.nTex, MEMORY_TAG_ARRAY);
+  Static_Vert *verts = NEW_ARR(alloc, Static_Vert, size.nVerts, 
       MEMORY_TAG_ARRAY);
-  u32 *indices = MEMORY_NEW_ARR(u32, size.nVerts, MEMORY_TAG_ARRAY);
+  u32 *indices = NEW_ARR(alloc, u32, size.nVerts, MEMORY_TAG_ARRAY);
   usize posIdx = 0, norIdx = 0, texIdx = 0, vertIdx = 0, indicesIdx = 0;
 
   for (usize i = 0; i < nCmds; i++)
@@ -133,13 +134,14 @@ skip:
     }
   }
 
-  MEMORY_FREE_ARR(cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(pos, Vec3, size.nPos, MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(nor, Vec3, size.nNor, MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(tex, Vec2, size.nTex, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, pos, Vec3, size.nPos, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, nor, Vec3, size.nNor, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, tex, Vec2, size.nTex, MEMORY_TAG_ARRAY);
 
-  Static_Shape *shape = MEMORY_NEW_ARR(Static_Shape, 1, MEMORY_TAG_ARRAY);
-  verts = MEMORY_RESIZE_ARR(verts, Static_Vert, size.nVerts, vertIdx, MEMORY_TAG_ARRAY);
+  Static_Shape *shape = NEW_ARR(alloc, Static_Shape, 1, MEMORY_TAG_ARRAY);
+  verts = RESIZE_ARR(alloc, verts, Static_Vert, size.nVerts, vertIdx, 
+      MEMORY_TAG_ARRAY);
   shape->name = "obj";
   shape->indices = indices;
   shape->nIndices = size.nVerts;
@@ -148,7 +150,6 @@ skip:
 
   model->nShapes = 1;
   model->shapes = shape;
-
 
   return ERR_OK;
 }

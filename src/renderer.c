@@ -9,7 +9,6 @@
 #include <vulkan/vulkan.h>
 
 #include <notte/renderer.h>
-#include <notte/memory.h>
 
 /* === TYPES === */
 
@@ -23,14 +22,16 @@ typedef struct
   VkSurfaceFormatKHR format;
   VkPresentModeKHR presentMode;
   VkExtent2D extent;
-  u32 imageCount;
+  u32 nImages;
   VkSwapchainKHR swapchain;
+  VkImage *images;
+  VkImageView *imageViews;
 } Swapchain;
 
 struct Renderer
 {
   Plat_Window *win;
-  VkAllocationCallbacks *alloc;
+  VkAllocationCallbacks *allocCbs;
   VkInstance vk;
   VkPhysicalDevice pDev;
   VkDevice dev;
@@ -38,6 +39,7 @@ struct Renderer
   VkSurfaceKHR surface;
   Queue_Family_Info queueInfo;
   Swapchain swapchain;
+  Allocator alloc;
 };
 
 /* === MACROS === */
@@ -66,8 +68,8 @@ static Err_Code SelectPhysicalDevice(Renderer *ren);
 static bool DeviceIsSuitable(Renderer *ren, VkPhysicalDevice dev, 
     Queue_Family_Info *info);
 static Err_Code CreateLogicalDevice(Renderer *ren);
-static Err_Code CreateSwapchain(Renderer *ren);
-static void DestroySwapchain(Renderer *ren);
+static Err_Code CreateSwapchain(Renderer *ren, Swapchain *swapchain);
+static void DestroySwapchain(Renderer *ren, Swapchain *swapchain);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -76,10 +78,11 @@ RendererCreate(Renderer_Create_Info *createInfo,
                Renderer **renOut)
 {
   Err_Code err;
-  Renderer *ren = MEMORY_NEW(Renderer, MEMORY_TAG_RENDERER);
+  Renderer *ren = NEW(createInfo->alloc, Renderer, MEMORY_TAG_RENDERER);
 
   ren->win = createInfo->win;
-  ren->alloc = NULL;
+  ren->allocCbs = NULL;
+  ren->alloc = createInfo->alloc;
 
   err = CreateInstance(ren);
   if (err)
@@ -88,7 +91,7 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created vulkan instance");
 
-  err = PlatWindowCreateVulkanSurface(ren->win, ren->vk, ren->alloc, 
+  err = PlatWindowCreateVulkanSurface(ren->win, ren->vk, ren->allocCbs, 
       &ren->surface);
   if (err)
   {
@@ -110,7 +113,7 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created logical device");
 
-  err = CreateSwapchain(ren);
+  err = CreateSwapchain(ren, &ren->swapchain);
   if (err)
   {
     return err;
@@ -124,11 +127,11 @@ RendererCreate(Renderer_Create_Info *createInfo,
 void 
 RendererDestroy(Renderer *ren)
 {
-  DestroySwapchain(ren);
-  vkDestroySurfaceKHR(ren->vk, ren->surface, ren->alloc);
-  vkDestroyDevice(ren->dev, ren->alloc);
-  vkDestroyInstance(ren->vk, ren->alloc);
-  MEMORY_FREE(ren, Renderer, MEMORY_TAG_RENDERER);
+  DestroySwapchain(ren, &ren->swapchain);
+  vkDestroySurfaceKHR(ren->vk, ren->surface, ren->allocCbs);
+  vkDestroyDevice(ren->dev, ren->allocCbs);
+  vkDestroyInstance(ren->vk, ren->allocCbs);
+  FREE(ren->alloc, ren, Renderer, MEMORY_TAG_RENDERER);
 }
 
 /* === PRIVATE FUNCTIONS === */
@@ -150,7 +153,7 @@ CreateInstance(Renderer *ren)
   totalExtensionCount = platExtensionCount + 
     (sizeof(requiredExtensions) / sizeof(requiredExtensions[0]));
 
-  extensions = MEMORY_NEW_ARR(const char *, totalExtensionCount, 
+  extensions = NEW_ARR(ren->alloc, const char *, totalExtensionCount, 
       MEMORY_TAG_ARRAY);
 
   if (!PlatWindowGetInstanceExtensions(ren->win, &platExtensionCount, 
@@ -165,7 +168,7 @@ CreateInstance(Renderer *ren)
   }
 
   vkEnumerateInstanceExtensionProperties(NULL, &supportedExtensionCount, NULL);
-  supportedExtensions = MEMORY_NEW_ARR(VkExtensionProperties, 
+  supportedExtensions = NEW_ARR(ren->alloc, VkExtensionProperties, 
       supportedExtensionCount, MEMORY_TAG_ARRAY);
 
   vkEnumerateInstanceExtensionProperties(NULL, &supportedExtensionCount, 
@@ -189,15 +192,15 @@ CreateInstance(Renderer *ren)
     .ppEnabledExtensionNames = extensions,
   };
 
-  vkErr = vkCreateInstance(&createInfo, ren->alloc, &ren->vk);
+  vkErr = vkCreateInstance(&createInfo, ren->allocCbs, &ren->vk);
   if (vkErr)
   {
     return ERR_LIBRARY_FAILURE;
   }
 
-  MEMORY_FREE_ARR((char *) extensions, const char *, totalExtensionCount, 
+  FREE_ARR(ren->alloc, (char *) extensions, const char *, totalExtensionCount, 
       MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(supportedExtensions, VkExtensionProperties, 
+  FREE_ARR(ren->alloc, supportedExtensions, VkExtensionProperties, 
       supportedExtensionCount, MEMORY_TAG_ARRAY);
   return ERR_OK;
 }
@@ -215,7 +218,7 @@ DeviceIsSuitable(Renderer *ren,
   u32 nFormats, nPresentModes;
 
   vkEnumerateDeviceExtensionProperties(dev, NULL, &nExtensions, NULL);
-  extensions = MEMORY_NEW_ARR(VkExtensionProperties, nExtensions, 
+  extensions = NEW_ARR(ren->alloc, VkExtensionProperties, nExtensions, 
       MEMORY_TAG_ARRAY);
   vkEnumerateDeviceExtensionProperties(dev, NULL, &nExtensions, extensions);
 
@@ -240,7 +243,7 @@ DeviceIsSuitable(Renderer *ren,
         goto found;
       }
     }
-    MEMORY_FREE_ARR(extensions, VkExtensionProperties, nExtensions, 
+    FREE_ARR(ren->alloc, extensions, VkExtensionProperties, nExtensions, 
         MEMORY_TAG_ARRAY);
     return false;
 found:
@@ -249,7 +252,7 @@ found:
 
   vkGetPhysicalDeviceQueueFamilyProperties(dev, &nQueueFamilies, NULL);
 
-  queueFamilies = MEMORY_NEW_ARR(VkQueueFamilyProperties, nQueueFamilies, 
+  queueFamilies = NEW_ARR(ren->alloc, VkQueueFamilyProperties, nQueueFamilies, 
       MEMORY_TAG_ARRAY);
 
   vkGetPhysicalDeviceQueueFamilyProperties(dev, &nQueueFamilies, queueFamilies);
@@ -272,9 +275,9 @@ found:
     }
   }
 
-  MEMORY_FREE_ARR(queueFamilies, VkQueueFamilyProperties, nQueueFamilies, 
+  FREE_ARR(ren->alloc, queueFamilies, VkQueueFamilyProperties, nQueueFamilies, 
       MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(extensions, VkExtensionProperties, nExtensions, 
+  FREE_ARR(ren->alloc, extensions, VkExtensionProperties, nExtensions, 
       MEMORY_TAG_ARRAY);
   return hasGraphics & hasPresent;
 }
@@ -291,7 +294,7 @@ SelectPhysicalDevice(Renderer *ren)
     return ERR_NO_SUITABLE_HARDWARE;
   }
 
-  devs = MEMORY_NEW_ARR(VkPhysicalDevice, nDevs, MEMORY_TAG_ARRAY);
+  devs = NEW_ARR(ren->alloc, VkPhysicalDevice, nDevs, MEMORY_TAG_ARRAY);
 
   vkEnumeratePhysicalDevices(ren->vk, &nDevs, devs);
 
@@ -300,7 +303,7 @@ SelectPhysicalDevice(Renderer *ren)
     if (DeviceIsSuitable(ren, devs[i], &ren->queueInfo))
     {
       ren->pDev = devs[i];
-      MEMORY_FREE_ARR(devs, VkPhysicalDevice, nDevs, MEMORY_TAG_ARRAY);
+      FREE_ARR(ren->alloc, devs, VkPhysicalDevice, nDevs, MEMORY_TAG_ARRAY);
       return ERR_OK;
     }
   }
@@ -350,7 +353,7 @@ CreateLogicalDevice(Renderer *ren)
     .ppEnabledLayerNames = requiredLayers,
   };
 
-  vkErr = vkCreateDevice(ren->pDev, &createInfo, ren->alloc, &ren->dev);
+  vkErr = vkCreateDevice(ren->pDev, &createInfo, ren->allocCbs, &ren->dev);
   if (vkErr)
   {
     return ERR_LIBRARY_FAILURE;
@@ -364,7 +367,8 @@ CreateLogicalDevice(Renderer *ren)
 }
 
 static Err_Code 
-CreateSwapchain(Renderer *ren)
+CreateSwapchain(Renderer *ren,
+                Swapchain *swapchain)
 {
   VkResult vkErr;
   VkSurfaceCapabilitiesKHR capabilities;
@@ -379,7 +383,7 @@ CreateSwapchain(Renderer *ren)
   vkGetPhysicalDeviceSurfaceFormatsKHR(ren->pDev, ren->surface, &nFormats, 
       NULL);
 
-  formats = MEMORY_NEW_ARR(VkSurfaceFormatKHR, nFormats, MEMORY_TAG_ARRAY);
+  formats = NEW_ARR(ren->alloc, VkSurfaceFormatKHR, nFormats, MEMORY_TAG_ARRAY);
 
   vkGetPhysicalDeviceSurfaceFormatsKHR(ren->pDev, ren->surface, &nFormats, 
       formats);
@@ -389,17 +393,17 @@ CreateSwapchain(Renderer *ren)
     if (formats[i].format == VK_FORMAT_B8G8R8A8_SRGB && 
         formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
     {
-      ren->swapchain.format = formats[i];
+      swapchain->format = formats[i];
       goto foundFormat;
     }
   }
-  ren->swapchain.format = formats[0];
+  swapchain->format = formats[0];
 foundFormat:
 
   vkGetPhysicalDeviceSurfacePresentModesKHR(ren->pDev, ren->surface, 
       &nPresentModes, NULL);
 
-  presentModes = MEMORY_NEW_ARR(VkPresentModeKHR, nPresentModes, 
+  presentModes = NEW_ARR(ren->alloc, VkPresentModeKHR, nPresentModes, 
       MEMORY_TAG_ARRAY);
 
   vkGetPhysicalDeviceSurfacePresentModesKHR(ren->pDev, ren->surface, 
@@ -409,16 +413,16 @@ foundFormat:
   {
     if (presentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) 
     {
-      ren->swapchain.presentMode = presentModes[i];
+      swapchain->presentMode = presentModes[i];
       goto foundMailbox;
     }
   }
-  ren->swapchain.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  swapchain->presentMode = VK_PRESENT_MODE_FIFO_KHR;
 foundMailbox:
 
   if (capabilities.currentExtent.width != 0xFFFFFFFF)
   {
-    ren->swapchain.extent = capabilities.currentExtent;
+    swapchain->extent = capabilities.currentExtent;
   } else
   {
     u32 w, h;
@@ -434,29 +438,29 @@ foundMailbox:
         capabilities.minImageExtent.height,
         capabilities.maxImageExtent.height);
 
-    ren->swapchain.extent = actualExtent;
+    swapchain->extent = actualExtent;
   }
 
-  ren->swapchain.imageCount = capabilities.minImageCount + 1;
+  swapchain->nImages = capabilities.minImageCount + 1;
   if (capabilities.maxImageCount > 0 && 
-      ren->swapchain.imageCount > capabilities.maxImageCount)
+      swapchain->nImages > capabilities.maxImageCount)
   {
-    ren->swapchain.imageCount = capabilities.maxImageCount;
+    swapchain->nImages = capabilities.maxImageCount;
   }
 
   VkSwapchainCreateInfoKHR createInfo = 
   {
     .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
     .surface = ren->surface,
-    .minImageCount = ren->swapchain.imageCount,
-    .imageFormat = ren->swapchain.format.format,
-    .imageColorSpace = ren->swapchain.format.colorSpace,
-    .imageExtent = ren->swapchain.extent,
+    .minImageCount = swapchain->nImages,
+    .imageFormat = swapchain->format.format,
+    .imageColorSpace = swapchain->format.colorSpace,
+    .imageExtent = swapchain->extent,
     .imageArrayLayers = 1,
     .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
     .preTransform = capabilities.currentTransform,
     .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-    .presentMode = ren->swapchain.presentMode,
+    .presentMode = swapchain->presentMode,
     .clipped = VK_TRUE,
     .oldSwapchain = VK_NULL_HANDLE,
   };
@@ -476,24 +480,75 @@ foundMailbox:
     createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   }
 
-  vkErr = vkCreateSwapchainKHR(ren->dev, &createInfo, ren->alloc, 
-      &ren->swapchain.swapchain);
+  vkErr = vkCreateSwapchainKHR(ren->dev, &createInfo, ren->allocCbs, 
+      &swapchain->swapchain);
   if (vkErr)
   {
     return ERR_LIBRARY_FAILURE;
   }
 
-  MEMORY_FREE_ARR(presentModes, VkPresentModeKHR, nPresentModes, 
+
+  vkGetSwapchainImagesKHR(ren->dev, swapchain->swapchain, &swapchain->nImages,
+      NULL);
+  swapchain->images = NEW_ARR(ren->alloc, VkImage, swapchain->nImages, 
       MEMORY_TAG_ARRAY);
-  MEMORY_FREE_ARR(formats, VkSurfaceFormatKHR, nFormats, 
+  vkGetSwapchainImagesKHR(ren->dev, swapchain->swapchain, &swapchain->nImages,
+      swapchain->images);
+
+  swapchain->imageViews = NEW_ARR(ren->alloc, VkImageView, swapchain->nImages,
+      MEMORY_TAG_ARRAY);
+
+  for (u32 i = 0; i < swapchain->nImages; i++)
+  {
+    VkImageViewCreateInfo createInfo =
+    {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = swapchain->images[i],
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = swapchain->format.format,
+      .components = {
+        .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+        .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+        .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+        .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+      },
+      .subresourceRange = 
+      {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+      },
+    };
+
+    vkErr = vkCreateImageView(ren->dev, &createInfo, ren->allocCbs, 
+        &swapchain->imageViews[i]);
+    if (vkErr)
+    {
+      return ERR_LIBRARY_FAILURE;
+    }
+  }
+  FREE_ARR(ren->alloc, presentModes, VkPresentModeKHR, nPresentModes, 
+      MEMORY_TAG_ARRAY);
+  FREE_ARR(ren->alloc, formats, VkSurfaceFormatKHR, nFormats, 
       MEMORY_TAG_ARRAY);
 
   return ERR_OK;
 }
 
 static void
-DestroySwapchain(Renderer *ren)
+DestroySwapchain(Renderer *ren, Swapchain *swapchain)
 {
-  vkDestroySwapchainKHR(ren->dev, ren->swapchain.swapchain, ren->alloc);
+  for (u32 i = 0; i < swapchain->nImages; i++)
+  {
+    vkDestroyImageView(ren->dev, swapchain->imageViews[i], ren->allocCbs);
+  }
+
+  FREE_ARR(ren->alloc, swapchain->imageViews, VkImageView, swapchain->nImages, 
+      MEMORY_TAG_ARRAY);
+  FREE_ARR(ren->alloc, swapchain->images, VkImage, swapchain->nImages, 
+      MEMORY_TAG_ARRAY);
+  vkDestroySwapchainKHR(ren->dev, swapchain->swapchain, ren->allocCbs);
 }
 

@@ -13,6 +13,7 @@
 #include <notte/math.h>
 #include <notte/plat.h>
 #include <notte/renderer.h>
+#include <notte/bson.h>
 
 int
 main()
@@ -21,12 +22,18 @@ main()
   Plat_Window *win;
   Plat_Event ev;
   Renderer *ren;
+  Bson_Ast *ast;
+  Membuf bsonBuf;
+  Parse_Result result;
 
   LogSetLevel(LOG_LEVEL_DEBUG);
 
   LOG_DEBUG("entering main function");
 
   MemoryInit();
+
+  Allocator libcAlloc = MemoryLoadLibcAllocator();
+
 
   err = PlatInit();
   if (err)
@@ -39,6 +46,7 @@ main()
   {
     .w = 100,
     .h = 100,
+    .alloc = libcAlloc,
   };
 
   err = PlatWindowCreate(&createInfo, &win);
@@ -51,6 +59,7 @@ main()
   Renderer_Create_Info rendererCreateInfo =
   {
     .win = win,
+    .alloc = libcAlloc,
   };
 
   err = RendererCreate(&rendererCreateInfo, &ren);
@@ -77,22 +86,6 @@ close:
 
   PlatWindowDestroy(win);
   RendererDestroy(ren);
-  /*
-  err = GraphicsInit();
-  if (err)
-  {
-    LOG_FATAL_CODE("failed to initialize graphics", err);
-    return EXIT_FAILURE;
-  }
-
-  while (!GraphicsShouldQuit())
-  {
-    GraphicsProcessEvents();
-    GraphicsDrawFrame();
-  }
-
-  GraphicsDeinit();
-  */
 
   MemoryPrintUsage();
   MemoryDeinit();

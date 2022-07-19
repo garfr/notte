@@ -26,6 +26,7 @@ struct Plat_Window
   bool shouldClose;
   Plat_Event events[PLAT_WINDOW_MAX_EVENTS];
   usize eventTop, eventBottom;
+  Allocator alloc;
 };
 
 /* === CONSTANTS === */
@@ -65,8 +66,9 @@ Err_Code
 PlatWindowCreate(Plat_Window_Create_Info *info, 
                  Plat_Window **winOut)
 {
-  Plat_Window *win = MEMORY_NEW(Plat_Window, MEMORY_TAG_PLATFORM);
+  Plat_Window *win = NEW(info->alloc, Plat_Window, MEMORY_TAG_PLATFORM);
 
+  win->alloc = info->alloc;
   win->shouldClose = false;
   win->eventTop = win->eventBottom = 0;
 
@@ -101,7 +103,7 @@ PlatWindowCreate(Plat_Window_Create_Info *info,
 void 
 PlatWindowDestroy(Plat_Window *win)
 {
-  MEMORY_FREE(win, Plat_Window, MEMORY_TAG_PLATFORM);
+  FREE(win->alloc, win, Plat_Window, MEMORY_TAG_PLATFORM);
 }
 
 bool 

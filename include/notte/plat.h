@@ -11,12 +11,14 @@
 
 #include <notte/defs.h>
 #include <notte/error.h>
+#include <notte/memory.h>
 
 typedef struct Plat_Window Plat_Window;
 
 typedef struct
 {
   u32 w, h;
+  Allocator alloc;
 } Plat_Window_Create_Info;
 
 typedef enum

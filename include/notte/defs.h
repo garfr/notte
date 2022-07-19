@@ -8,8 +8,10 @@
 #define NOTTE_DEFS_H
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <notte/log.h>
 
@@ -32,5 +34,25 @@ typedef float f32;
 typedef double f64;
 
 typedef size_t usize;
+
+#define PARSE_RESULT_MAX_MSG 512
+
+typedef struct
+{
+  char msg[PARSE_RESULT_MAX_MSG];
+  int line;
+} Parse_Result;
+
+#if defined(WIN32) || defined(_WIN32)
+#define NOTTE_WINDOWS
+#else
+#error Unsupported platform!
+#endif
+
+#ifdef NOTTE_WINDOWS
+#define NOTTE_MAX_ALIGN 8
+#else
+#define NOTTE_MAX_ALIGN alignof(max_align_t)
+#endif
 
 #endif /* NOTTE_DEFS_H */

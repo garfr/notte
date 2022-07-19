@@ -11,16 +11,20 @@
 #include <notte/memory.h>
 
 void 
-MembufDestroy(Membuf *membuf)
+MembufDestroy(Membuf *membuf, 
+              Allocator alloc)
 {
   if (membuf->data != NULL)
   {
-    MEMORY_FREE_ARR((u8 *) membuf->data, u8, membuf->size, MEMORY_TAG_MEMBUF);
+    FREE_ARR(alloc, (u8 *) membuf->data, u8, membuf->size + 1, 
+        MEMORY_TAG_MEMBUF);
   }
 }
 
 Err_Code 
-MembufLoadFile(Membuf *membuf, const char *file)
+MembufLoadFile(Membuf *membuf, 
+               const char *file, 
+               Allocator alloc)
 {
   membuf->data = NULL;
 
@@ -34,7 +38,7 @@ MembufLoadFile(Membuf *membuf, const char *file)
   membuf->size = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  u8 *data = MEMORY_NEW_ARR(u8, membuf->size + 1, MEMORY_TAG_MEMBUF);
+  u8 *data = NEW_ARR(alloc, u8, membuf->size + 1, MEMORY_TAG_MEMBUF);
   if (data == NULL)
   {
     return ERR_NO_MEM;

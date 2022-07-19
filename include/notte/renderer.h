@@ -9,10 +9,12 @@
 
 #include <notte/error.h>
 #include <notte/plat.h>
+#include <notte/memory.h>
 
 typedef struct
 {
   Plat_Window *win;
+  Allocator alloc;
 } Renderer_Create_Info;
 
 typedef struct Renderer Renderer;

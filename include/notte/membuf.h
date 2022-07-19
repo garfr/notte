@@ -9,6 +9,7 @@
 
 #include <notte/error.h>
 #include <notte/defs.h>
+#include <notte/memory.h>
 
 /* Big slab of immutable data. */
 typedef struct
@@ -17,8 +18,8 @@ typedef struct
   usize size;
 } Membuf;
 
-void MembufDestroy(Membuf *membuf);
+void MembufDestroy(Membuf *membuf, Allocator alloc);
 
-Err_Code MembufLoadFile(Membuf *membuf, const char *file);
+Err_Code MembufLoadFile(Membuf *membuf, const char *file, Allocator alloc);
 
 #endif /* NOTTE_MEMBUF_H */

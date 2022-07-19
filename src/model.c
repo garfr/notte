@@ -14,14 +14,15 @@
 #include <notte/log.h>
 #include <notte/memory.h>
 
-void StaticModelDestroy(Static_Model *model)
+void StaticModelDestroy(Static_Model *model,
+                        Allocator alloc)
 {
   for (usize i = 0; i < model->nShapes; i++)
   {
     Static_Shape *shape = &model->shapes[i];
-    MEMORY_FREE_ARR(shape->indices, u32, shape->nIndices, MEMORY_TAG_ARRAY);
-    MEMORY_FREE_ARR(shape->verts, Static_Vert, shape->nVerts, MEMORY_TAG_ARRAY);
+    FREE_ARR(alloc, shape->indices, u32, shape->nIndices, MEMORY_TAG_ARRAY);
+    FREE_ARR(alloc, shape->verts, Static_Vert, shape->nVerts, MEMORY_TAG_ARRAY);
   }
 
-  MEMORY_FREE_ARR(model->shapes, Static_Shape, model->nShapes, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, model->shapes, Static_Shape, model->nShapes, MEMORY_TAG_ARRAY);
 }

@@ -1,0 +1,4 @@
+tri_technique: {
+  vert: "tri.vert",
+  frag: "tri.frag",
+}

@@ -10,6 +10,8 @@ src = [
   'src/obj.c',
   'src/renderer.c',
   'src/plat_win32.c',
+  #  'src/bson.c',
+  'src/linear_allocator.c',
 ]
 
 cc = meson.get_compiler('c')

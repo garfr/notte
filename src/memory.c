@@ -24,11 +24,24 @@ static const char *
 memoryTagToStr[] = {
   [MEMORY_TAG_UNKNOWN]  = "UNKNOWN ",
   [MEMORY_TAG_ARRAY]    = "ARRAY   ",
+  [MEMORY_TAG_STRING]   = "STRING  ",
   [MEMORY_TAG_MEMBUF]   = "MEMBUF  ",
   [MEMORY_TAG_VECTOR]   = "VECTOR  ",
   [MEMORY_TAG_PLATFORM] = "PLATFORM",
   [MEMORY_TAG_RENDERER] = "RENDERER",
+  [MEMORY_TAG_ALLOC]    = "ALLOC   ",
+  [MEMORY_TAG_BSON]     = "BSON    ",
 };
+
+Allocator libcAllocator;
+AllocatorLogic libcAllocatorLogic;
+
+/* === PROTOTYPES === */
+
+static void *LibcNew(void *ud, usize sz, Memory_Tag tag);
+static void *LibcResize(void *ud, void *ptr, usize osz, usize nsz, 
+    Memory_Tag tag);
+static void LibcFree(void *ud, void *ptr, usize sz, Memory_Tag tag);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -42,12 +55,24 @@ MemoryInit(void)
     memoryState.taggedAllocations[tag] = 0;
     memoryState.taggedAllocated[tag] = 0;
   }
+
+  libcAllocatorLogic.new = LibcNew;
+  libcAllocatorLogic.resize = LibcResize;
+  libcAllocatorLogic.free = LibcFree;
+  libcAllocator.logic = &libcAllocatorLogic;
+  libcAllocator.ud = NULL;
 }
 
 void 
 MemoryDeinit(void)
 {
   return;
+}
+
+Allocator 
+MemoryLoadLibcAllocator(void)
+{
+  return libcAllocator;
 }
 
 void 
@@ -60,78 +85,6 @@ MemoryPrintUsage(void)
     printf("%s %zu unfreed bytes, %zu unfreed allocations\n", memoryTagToStr[tag],
         memoryState.taggedAllocated[tag], memoryState.taggedAllocations[tag]);
   }
-}
-
-void *
-MemoryAlloc(usize size, 
-            Memory_Tag tag)
-{
-  if (tag == MEMORY_TAG_UNKNOWN)
-  {
-    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
-  }
-
-  memoryState.totalAllocations++;
-  memoryState.taggedAllocations[tag]++;
-  memoryState.totalAllocated += size;
-  memoryState.taggedAllocated[tag] += size;
-
-  void *block = calloc(1, size);
-  if (block == NULL)
-  {
-    LOG_FATAL("out of memory");
-    exit(EXIT_FAILURE);
-  }
-  return block;
-}
-
-void *
-MemoryResize(void *ptr, 
-             usize oldSize, 
-             usize newSize, 
-             Memory_Tag tag)
-{
-  if (tag == MEMORY_TAG_UNKNOWN)
-  {
-    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
-  }
-
-  if (oldSize > newSize)
-  {
-    memoryState.totalAllocated -= (oldSize - newSize);
-    memoryState.taggedAllocated[tag] -= (oldSize - newSize);
-  } else
-  {
-    memoryState.totalAllocated += (newSize - oldSize);
-    memoryState.taggedAllocated[tag] += (newSize - oldSize);
-  }
-
-  void *block = realloc(ptr, newSize);
-  if (block == NULL)
-  {
-    LOG_FATAL("out of memory");
-    exit(EXIT_FAILURE);
-  }
-
-  return block;
-}
-
-void 
-MemoryFree(void *ptr, 
-           usize size, 
-           Memory_Tag tag)
-{
-  if (tag == MEMORY_TAG_UNKNOWN)
-  {
-    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
-  }
-
-  memoryState.totalAllocations--;
-  memoryState.taggedAllocations[tag]--;
-  memoryState.totalAllocated -= size;
-  memoryState.taggedAllocated[tag] -= size;;
-
-  free(ptr);
 }
 
 void *
@@ -158,4 +111,79 @@ MemorySet(void *dest,
 {
   memset(dest, val, size);
   return dest;
+}
+
+static void *
+LibcNew(void *ud, usize sz, Memory_Tag tag)
+{
+  (void) ud;
+  if (tag == MEMORY_TAG_UNKNOWN)
+  {
+    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
+  }
+
+  memoryState.totalAllocations++;
+  memoryState.taggedAllocations[tag]++;
+  memoryState.totalAllocated += sz;
+  memoryState.taggedAllocated[tag] += sz;
+
+  void *block = calloc(1, sz);
+  if (block == NULL)
+  {
+    LOG_FATAL("out of memory");
+    exit(EXIT_FAILURE);
+  }
+  return block;
+}
+
+static void *
+LibcResize(void *ud, 
+           void *ptr, 
+           usize osz, 
+           usize nsz, 
+           Memory_Tag tag)
+{
+  (void) ud;
+  if (tag == MEMORY_TAG_UNKNOWN)
+  {
+    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
+  }
+
+  if (osz > nsz)
+  {
+    memoryState.totalAllocated -= (osz - nsz);
+    memoryState.taggedAllocated[tag] -= (osz - nsz);
+  } else
+  {
+    memoryState.totalAllocated += (nsz - osz);
+    memoryState.taggedAllocated[tag] += (nsz - osz);
+  }
+
+  void *block = realloc(ptr, nsz);
+  if (block == NULL)
+  {
+    LOG_FATAL("out of memory");
+    exit(EXIT_FAILURE);
+  }
+
+  return block;
+}
+
+static void 
+LibcFree(void *ud, 
+         void *ptr, 
+         usize sz, Memory_Tag tag)
+{
+  (void) ud;
+  if (tag == MEMORY_TAG_UNKNOWN)
+  {
+    LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
+  }
+
+  memoryState.totalAllocations--;
+  memoryState.taggedAllocations[tag]--;
+  memoryState.totalAllocated -= sz;
+  memoryState.taggedAllocated[tag] -= sz;
+
+  free(ptr);
 }

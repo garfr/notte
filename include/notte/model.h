@@ -11,8 +11,7 @@
 #include <notte/defs.h>
 #include <notte/membuf.h>
 #include <notte/math.h>
-
-#define PARSE_RESULT_MAX_MSG 512
+#include <notte/memory.h>
 
 typedef struct
 {
@@ -35,16 +34,10 @@ typedef struct
   usize nShapes;
 } Static_Model;
 
-typedef struct
-{
-  char msg[PARSE_RESULT_MAX_MSG];
-  int line;
-} Parse_Result;
-
 /* Loads a wavefront .OBJ file as a static model. */
-Err_Code StaticModelLoadObj(Static_Model *model, Parse_Result *result, 
-    Membuf buf);
+Err_Code StaticModelLoadObj(Allocator alloc, Static_Model *model, 
+    Parse_Result *result, Membuf buf);
 
-void StaticModelDestroy(Static_Model *model);
+void StaticModelDestroy(Static_Model *model, Allocator alloc);
 
 #endif /* NOTTE_MODEL_H */
