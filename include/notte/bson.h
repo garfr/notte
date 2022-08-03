@@ -28,14 +28,14 @@ typedef struct
   void *iter;
 } Bson_Dict_Iterator;
 
-Err_Code BsonAstParse(Bson_Ast **ast, Parse_Result *result, Membuf buf);
-void BsonAstDestroy(Bson_Ast *ast);
+Err_Code BsonAstParse(Bson_Ast **ast, Allocator alloc, Parse_Result *result, 
+    Membuf buf);
+void BsonAstDestroy(Bson_Ast *ast, Allocator alloc);
 Bson_Value *BsonAstGetValue(Bson_Ast *ast);
 
 Bson_Value_Type BsonValueGetType(Bson_Value *value);
 
 /* Returns NULL if not found. */
-Bson_Value *BsonValueLookupSlice(Bson_Value *value, const u8 *str, usize size);
 Bson_Value *BsonValueLookup(Bson_Value *value, String str);
 
 String BsonValueGetString(Bson_Value *value);

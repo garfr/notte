@@ -18,6 +18,7 @@ struct
   usize totalAllocated;
   usize taggedAllocations[MEMORY_TAG_TAG_COUNT];
   usize taggedAllocated[MEMORY_TAG_TAG_COUNT];
+
 } memoryState;
 
 static const char *
@@ -26,15 +27,18 @@ memoryTagToStr[] = {
   [MEMORY_TAG_ARRAY]    = "ARRAY   ",
   [MEMORY_TAG_STRING]   = "STRING  ",
   [MEMORY_TAG_MEMBUF]   = "MEMBUF  ",
+  [MEMORY_TAG_STRING]   = "STRING  ",
   [MEMORY_TAG_VECTOR]   = "VECTOR  ",
   [MEMORY_TAG_PLATFORM] = "PLATFORM",
+  [MEMORY_TAG_DICT]     = "DICT    ",
   [MEMORY_TAG_RENDERER] = "RENDERER",
   [MEMORY_TAG_ALLOC]    = "ALLOC   ",
   [MEMORY_TAG_BSON]     = "BSON    ",
+  [MEMORY_TAG_FS]       = "FS      ",
 };
 
 Allocator libcAllocator;
-AllocatorLogic libcAllocatorLogic;
+Allocator_Logic libcAllocatorLogic;
 
 /* === PROTOTYPES === */
 
@@ -169,6 +173,7 @@ LibcResize(void *ud,
   return block;
 }
 
+volatile int thing = 0;
 static void 
 LibcFree(void *ud, 
          void *ptr, 
@@ -180,10 +185,19 @@ LibcFree(void *ud,
     LOG_WARN("memory allocated with MEMORY_TAG_UNKNOWN");
   }
 
-  memoryState.totalAllocations--;
-  memoryState.taggedAllocations[tag]--;
-  memoryState.totalAllocated -= sz;
-  memoryState.taggedAllocated[tag] -= sz;
+  if (memoryState.totalAllocations == 0 
+   || memoryState.totalAllocated < sz
+   || memoryState.taggedAllocations[tag]== 0 
+   || memoryState.taggedAllocated[tag] < sz)
+  {
+    LOG_WARN("use after free");
+  } else
+  {
+    memoryState.totalAllocations--;
+    memoryState.taggedAllocations[tag]--;
+    memoryState.totalAllocated -= sz;
+    memoryState.taggedAllocated[tag] -= sz;
+  }
 
   free(ptr);
 }

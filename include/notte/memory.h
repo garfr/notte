@@ -18,7 +18,9 @@ typedef enum
   MEMORY_TAG_VECTOR,
   MEMORY_TAG_RENDERER,
   MEMORY_TAG_PLATFORM,
+  MEMORY_TAG_DICT,
   MEMORY_TAG_BSON,
+  MEMORY_TAG_FS,
   MEMORY_TAG_ALLOC, /* For allocators. */
   MEMORY_TAG_TAG_COUNT,
 } Memory_Tag;
@@ -34,11 +36,11 @@ typedef struct
   Allocator_Alloc_Fn new;
   Allocator_Resize_Fn resize;
   Allocator_Free_Fn free;
-} AllocatorLogic;
+} Allocator_Logic;
 
 typedef struct
 {
-  AllocatorLogic *logic;
+  Allocator_Logic *logic;
   void *ud;
 } Allocator;
 

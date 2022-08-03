@@ -45,7 +45,8 @@ struct Bson_KV
 struct Bson_Ast
 {
   Bson_Value value;
-  Linear_Allocator alloc;
+  Linear_Allocator lin;
+  Allocator alloc;
 };
 
 typedef struct
@@ -58,7 +59,7 @@ typedef struct
 
 /* === MACROS === */
 
-#define IS_EOF(_parser) ((_parser)->idx > (_parser)->len)
+#define IS_EOF(_parser) ((_parser)->idx >= (_parser)->len)
 #define SKIPC(_parser) ((_parser)->idx++)
 #define NEXTC(_parser) ((_parser)->src[(_parser)->idx++])
 #define PEEKC(_parser) ((_parser)->src[(_parser)->idx])
@@ -69,19 +70,21 @@ typedef struct
 
 static void SkipWhitespace(Parser *parser);
 static Err_Code ParseValue(Parser *parser, Bson_Value *valueOut);
-static Bson_KV *AddEntry(Parser *parser, Bson_Dict *dict, u8 *key, usize keySz,
+static Bson_KV *AddEntry(Parser *parser, Bson_Dict *dict, String str,
     Bson_Value val);
 
 /* === PUBLIC FUNCTIONS === */
 
 Err_Code 
 BsonAstParse(Bson_Ast **astOut, 
+             Allocator alloc,
              Parse_Result *result, 
              Membuf buf)
 {
-  Bson_Ast *ast = MEMORY_NEW(Bson_Ast, MEMORY_TAG_BSON);
+  Bson_Ast *ast = NEW(alloc, Bson_Ast, MEMORY_TAG_BSON);
   ast->value.t = BSON_VALUE_DICT;
-  LinearAllocatorInit(&ast->alloc);
+  LinearAllocatorInit(&ast->lin, alloc);
+  ast->alloc = LinearAllocatorWrap(&ast->lin);
 
   Parser parser =
   {
@@ -94,15 +97,19 @@ BsonAstParse(Bson_Ast **astOut,
   {
     int c;
     SkipWhitespace(&parser);
+    if (IS_EOF(&parser))
+    {
+      break;
+    }
+
     usize start = parser.idx;
     while (isalpha((c = PEEKC(&parser))) || c == '_')
     {
       SKIPC(&parser);
     }
     usize strLen = parser.idx - start;
-    u8 *str = LinearAllocatorAlloc(&ast->alloc, strLen + 1);
-    memcpy(str, parser.src + start, strLen);
-    str[strLen] = '\0';
+    String str = StringCloneSlice(parser.ast->alloc, parser.src + start, 
+        strLen);
     while (PEEKC(&parser) != ':')
     {
       SKIPC(&parser);
@@ -110,7 +117,7 @@ BsonAstParse(Bson_Ast **astOut,
     SKIPC(&parser);
     Bson_Value value;
     ParseValue(&parser, &value);
-    AddEntry(&parser, &parser.ast->value.dict, str, strLen, value);
+    AddEntry(&parser, &parser.ast->value.dict, str, value);
   }
 
   *astOut = ast;
@@ -118,10 +125,10 @@ BsonAstParse(Bson_Ast **astOut,
   return ERR_OK;
 }
 
-void BsonAstDestroy(Bson_Ast *ast)
+void BsonAstDestroy(Bson_Ast *ast, Allocator alloc)
 {
-  LinearAllocatorDeinit(&ast->alloc);
-  MEMORY_FREE(ast, Bson_Ast, MEMORY_TAG_BSON);
+  LinearAllocatorDeinit(&ast->lin);
+  FREE(alloc, ast, Bson_Ast, MEMORY_TAG_BSON);
 }
 
 Bson_Value *
@@ -223,7 +230,7 @@ BsonDictIteratorNext(Bson_Dict_Iterator *iter,
 static void 
 SkipWhitespace(Parser *parser)
 {
-  while (isspace(PEEKC(parser)))
+  while (!IS_EOF(parser) && isspace(PEEKC(parser)))
   {
     SKIPC(parser);
   }
@@ -277,12 +284,11 @@ ParseValue(Parser *parser,
     while (NEXTC(parser) != '\"')
       ;
     usize len = (parser->idx - start) - 1;
-    u8 *buf = LinearAllocatorAlloc(&parser->ast->alloc, len + 1);
+    u8 *buf = NEW_ARR(parser->ast->alloc, u8, len + 1, MEMORY_TAG_BSON);
     memcpy(buf, parser->src + start, len);
     buf[len] = '\0';
     valueOut->t = BSON_VALUE_STRING;
-    valueOut->str = buf;
-    valueOut->strSz = len;
+    valueOut->str = StringCloneSlice(parser->ast->alloc, buf, len);
   } else if (c == 't')
   {
     SKIPC(parser);
@@ -309,7 +315,7 @@ ParseValue(Parser *parser,
     SKIPC(parser);
     usize cap = INIT_ARR_CAP;
     usize used = 0;
-    Vector vec = VECTOR_CREATE(Bson_Value);
+    Vector vec = VECTOR_CREATE(parser->ast->alloc, Bson_Value);
 
     while (1)
     {
@@ -317,8 +323,8 @@ ParseValue(Parser *parser,
       if (PEEKC(parser) == ']')
       {
         SKIPC(parser);
-        Bson_Value *values = LinearAllocatorAlloc(&parser->ast->alloc,  
-            sizeof(Bson_Value) * vec.elemsUsed);
+        Bson_Value *values = NEW_ARR(parser->ast->alloc,  
+            Bson_Value, vec.elemsUsed, MEMORY_TAG_BSON);
         memcpy(values, vec.buf, sizeof(Bson_Value) * vec.elemsUsed);
         valueOut->t = BSON_VALUE_ARRAY;
         valueOut->arr = values;
@@ -331,7 +337,7 @@ ParseValue(Parser *parser,
       {
         return err;
       }
-      VectorPush(&vec, &val);
+      VectorPush(&vec, parser->ast->alloc, &val);
       SkipWhitespace(parser);
       if (PEEKC(parser) == ',')
       {
@@ -348,11 +354,12 @@ ParseValue(Parser *parser,
       SkipWhitespace(parser);
       if (PEEKC(parser) == '}')
       {
+        SKIPC(parser);
         valueOut->t = BSON_VALUE_DICT;
         valueOut->dict.kv = chain;
         break;
       }
-      Bson_KV *kv = LinearAllocatorAlloc(&parser->ast->alloc, sizeof(Bson_KV));
+      Bson_KV *kv = NEW(parser->ast->alloc, Bson_KV, MEMORY_TAG_BSON);
 
       usize start = parser->idx;
       while (isalpha((c = PEEKC(parser))) || c == '_')
@@ -361,11 +368,7 @@ ParseValue(Parser *parser,
       }
 
       usize len = parser->idx - start;
-      u8 *buf = LinearAllocatorAlloc(&parser->ast->alloc, len + 1);
-      memcpy(buf, parser->src + start, len);
-      buf[len] = '\0';
-      kv->key = buf;
-      kv->keySz = len;
+      kv->key = StringCloneSlice(parser->ast->alloc, parser->src + start, len);
 
       SkipWhitespace(parser);
       SKIPC(parser);
@@ -387,9 +390,7 @@ ParseValue(Parser *parser,
       kv->next = chain;
       chain = kv;
     }
-
   }
-
 
   return ERR_OK;
 }
@@ -397,14 +398,12 @@ ParseValue(Parser *parser,
 static Bson_KV *
 AddEntry(Parser *parser, 
          Bson_Dict *dict, 
-         u8 *key, 
-         usize keySz,
+         String key, 
          Bson_Value val)
 {
-  Bson_KV *kv = LinearAllocatorAlloc(&parser->ast->alloc, sizeof(Bson_KV));
+  Bson_KV *kv = NEW(parser->ast->alloc, Bson_KV, MEMORY_TAG_BSON);
 
   kv->key = key;
-  kv->keySz = keySz;
   kv->val = val;
   kv->next = dict->kv;
   dict->kv = kv;

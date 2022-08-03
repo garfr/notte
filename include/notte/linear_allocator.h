@@ -27,7 +27,6 @@ typedef struct
 
 Err_Code LinearAllocatorInit(Linear_Allocator *out, Allocator alloc);
 void LinearAllocatorDeinit(Linear_Allocator *lin);
-
-void *LinearAllocatorAlloc(Linear_Allocator *lin, usize data);
+Allocator LinearAllocatorWrap(Linear_Allocator *lin);
 
 #endif /* NOTTE_LINEAR_ALLOCATOR_H */

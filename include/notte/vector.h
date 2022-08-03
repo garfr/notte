@@ -20,13 +20,13 @@ typedef struct
 
 /* === MACROS === */
 
-#define VECTOR_CREATE(_type) VectorCreate(sizeof(_type))
+#define VECTOR_CREATE(_alloc, _type) VectorCreate(_alloc, sizeof(_type))
 #define VECTOR_DEFAULT_ELEMS_ALLOC 8
 
 /* === INLINE FUNCTIONS === */
 
 NOTTE_INLINE Vector 
-VectorCreate(usize elemSize)
+VectorCreate(Allocator alloc, usize elemSize)
 {
   Vector vec = {
     .elemSize = elemSize,
@@ -34,18 +34,18 @@ VectorCreate(usize elemSize)
     .elemsAlloc = VECTOR_DEFAULT_ELEMS_ALLOC,
   };
 
-  vec.buf = MEMORY_NEW_ARR(u8, elemSize * VECTOR_DEFAULT_ELEMS_ALLOC, 
+  vec.buf = NEW_ARR(alloc, u8, elemSize * VECTOR_DEFAULT_ELEMS_ALLOC, 
       MEMORY_TAG_VECTOR);
 
   return vec;
 }
 
 NOTTE_INLINE void *
-VectorPush(Vector *vec, void *item)
+VectorPush(Vector *vec, Allocator alloc, void *item)
 {
   if (vec->elemsUsed + 1 > vec->elemsAlloc)
   {
-    vec->buf = MEMORY_RESIZE_ARR(vec->buf, u8, 
+    vec->buf = RESIZE_ARR(alloc, vec->buf, u8, 
         vec->elemSize * vec->elemsAlloc, 
         vec->elemSize * vec->elemsAlloc * 2, MEMORY_TAG_VECTOR);
     vec->elemsAlloc *= 2;
@@ -57,9 +57,10 @@ VectorPush(Vector *vec, void *item)
 }
 
 NOTTE_INLINE void
-VectorDestroy(Vector *vec)
+VectorDestroy(Vector *vec, Allocator alloc)
 {
-  MEMORY_FREE_ARR(vec, u8, vec->elemSize * vec->elemsAlloc, MEMORY_TAG_VECTOR);
+  FREE_ARR(alloc, vec->buf, u8, vec->elemSize * vec->elemsAlloc, 
+      MEMORY_TAG_VECTOR);
   vec->buf = NULL;
   vec->elemSize = vec->elemsUsed = vec->elemsAlloc = 0;
 }

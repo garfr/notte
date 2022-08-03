@@ -4,11 +4,13 @@
  * Vulkan renderer.
  */
 
-#include <string.h>
-
 #include <vulkan/vulkan.h>
+#include <shaderc/shaderc.h>
 
 #include <notte/renderer.h>
+#include <notte/membuf.h>
+#include <notte/bson.h>
+#include <notte/dict.h>
 
 /* === TYPES === */
 
@@ -28,6 +30,50 @@ typedef struct
   VkImageView *imageViews;
 } Swapchain;
 
+typedef enum
+{
+  SHADER_VERT,
+  SHADER_FRAG,
+} Shader_Type;
+
+typedef struct Shader
+{
+  VkShaderModule mod;
+  String name;
+} Shader;
+
+typedef struct
+{
+  String path;
+  Dict *dict;
+  shaderc_compiler_t compiler;
+  Fs_Driver *fs;
+} Shader_Manager;
+
+typedef struct 
+{
+  const u8 *path;
+  Shader *vert, *frag;
+  VkPipeline pipeline;
+  VkPipelineLayout layout;
+  VkRenderPass fakePass;
+} Technique;
+
+typedef struct
+{
+  Dict *dict;
+} Technique_Manager;
+
+typedef struct
+{
+  VkFramebuffer *swapFbs;
+  VkCommandPool commandPool;
+  VkCommandBuffer commandBuffer;
+  VkSemaphore imageAvailableSemaphore;
+  VkSemaphore renderFinishedSemaphore;
+  VkFence inFlightFence;
+} Render_Graph;
+
 struct Renderer
 {
   Plat_Window *win;
@@ -40,6 +86,12 @@ struct Renderer
   Queue_Family_Info queueInfo;
   Swapchain swapchain;
   Allocator alloc;
+
+  Fs_Driver *fs;
+
+  Shader_Manager shaders;
+  Technique_Manager techs;
+  Render_Graph graph;
 };
 
 /* === MACROS === */
@@ -70,6 +122,22 @@ static bool DeviceIsSuitable(Renderer *ren, VkPhysicalDevice dev,
 static Err_Code CreateLogicalDevice(Renderer *ren);
 static Err_Code CreateSwapchain(Renderer *ren, Swapchain *swapchain);
 static void DestroySwapchain(Renderer *ren, Swapchain *swapchain);
+static Err_Code CreatePipeline(Renderer *ren);
+static Err_Code ShaderManagerInit(Renderer *ren, Shader_Manager *shaders);
+static Shader *ShaderManagerOpen(Renderer *ren, Shader_Manager *shaders, String path, 
+    Shader_Type type);
+static void ShaderManagerDeinit(Renderer *ren, Shader_Manager *shaders);
+static void ShaderDestroy(void *ud, String name, void *item);
+static Err_Code TechniqueManagerInit(Renderer *ren, Technique_Manager *techs);
+static Err_Code TechniqueManagerOpen(Renderer *ren, Technique_Manager *techs, 
+    String name);
+static Technique *TechniqueManagerLookup(Technique_Manager *techs, String name);
+static void TechniqueManagerDeinit(Renderer *ren, Technique_Manager *techs);
+static void TechDestroy(void *ud, String name, void *ptr);
+static Err_Code RenderGraphInit(Renderer *ren, Render_Graph *graph);
+static void RenderGraphDeinit(Renderer *ren, Render_Graph *graph);
+static void RenderGraphRecord(Renderer *ren, Render_Graph *graph,
+                  u32 imageIndex);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -78,11 +146,13 @@ RendererCreate(Renderer_Create_Info *createInfo,
                Renderer **renOut)
 {
   Err_Code err;
+  Technique *tech;
   Renderer *ren = NEW(createInfo->alloc, Renderer, MEMORY_TAG_RENDERER);
 
   ren->win = createInfo->win;
   ren->allocCbs = NULL;
   ren->alloc = createInfo->alloc;
+  ren->fs = createInfo->fs;
 
   err = CreateInstance(ren);
   if (err)
@@ -120,13 +190,100 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created swapchain");
 
+  err = ShaderManagerInit(ren, &ren->shaders);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created shader manager");
+
+  err = TechniqueManagerInit(ren, &ren->techs);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created technique manager");
+
+  err = TechniqueManagerOpen(ren, &ren->techs, STRING_CSTR("tri.bson"));
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("loaded 'tri.bson' file");
+
+  err = RenderGraphInit(ren, &ren->graph);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created render graph");
+
   *renOut = ren;
+  return ERR_OK;
+}
+
+Err_Code 
+RendererDraw(Renderer *ren)
+{
+  VkResult vkErr;
+  uint32_t imageIndex;
+
+  vkWaitForFences(ren->dev, 1, &ren->graph.inFlightFence, VK_TRUE, UINT64_MAX);
+  vkResetFences(ren->dev, 1, &ren->graph.inFlightFence);
+  vkAcquireNextImageKHR(ren->dev, ren->swapchain.swapchain, UINT64_MAX, 
+      ren->graph.imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+
+  vkResetCommandBuffer(ren->graph.commandBuffer, 0);
+
+  RenderGraphRecord(ren, &ren->graph, imageIndex);
+
+  VkSemaphore waitSemaphores[] = {ren->graph.imageAvailableSemaphore};
+  VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+  VkSemaphore signalSemaphores[] = {ren->graph.renderFinishedSemaphore};
+
+  VkSubmitInfo submitInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .waitSemaphoreCount = 1,
+    .pWaitSemaphores = waitSemaphores,
+    .pWaitDstStageMask = waitStages,
+    .commandBufferCount = 1,
+    .pCommandBuffers = &ren->graph.commandBuffer,
+    .signalSemaphoreCount = 1,
+    .pSignalSemaphores = signalSemaphores,
+  };
+
+  vkErr = vkQueueSubmit(ren->graphicsQueue, 1, &submitInfo, 
+      ren->graph.inFlightFence);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  VkSwapchainKHR swapchains[] = {ren->swapchain.swapchain};
+
+  VkPresentInfoKHR presentInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+    .waitSemaphoreCount = 1,
+    .pWaitSemaphores = signalSemaphores,
+    .swapchainCount = 1,
+    .pSwapchains = swapchains,
+    .pImageIndices= &imageIndex,
+  };
+
+  vkQueuePresentKHR(ren->presentQueue, &presentInfo);
+
   return ERR_OK;
 }
 
 void 
 RendererDestroy(Renderer *ren)
 {
+  vkDeviceWaitIdle(ren->dev);
+  RenderGraphDeinit(ren, &ren->graph);
+  ShaderManagerDeinit(ren, &ren->shaders);
+  TechniqueManagerDeinit(ren, &ren->techs);
   DestroySwapchain(ren, &ren->swapchain);
   vkDestroySurfaceKHR(ren->vk, ren->surface, ren->allocCbs);
   vkDestroyDevice(ren->dev, ren->allocCbs);
@@ -552,3 +709,624 @@ DestroySwapchain(Renderer *ren, Swapchain *swapchain)
   vkDestroySwapchainKHR(ren->dev, swapchain->swapchain, ren->allocCbs);
 }
 
+static Err_Code 
+CreateTechnique(Renderer *ren, 
+                const u8 *path, 
+                Technique **tech)
+{
+  Err_Code err;
+  Membuf buf;
+  Bson_Ast *ast;
+  Parse_Result result;
+  Bson_Value *globals, *iter;
+  String key;
+
+  err = MembufLoadFile(&buf, path, ren->alloc);
+  if (err)
+  {
+    LOG_ERROR_FMT("Failed to load technique file: '%s'", path);
+    return err;
+  }
+
+  err = BsonAstParse(&ast, ren->alloc, &result, buf);
+  if (err)
+  {
+    return err;
+  }
+
+  return err;
+}
+
+static Err_Code 
+ShaderManagerInit(Renderer *ren, 
+                  Shader_Manager *shaders)
+{
+  shaders->dict = DICT_CREATE(ren->alloc, Shader, false);
+  shaders->compiler = shaderc_compiler_initialize();
+  shaders->fs = ren->fs;
+  return ERR_OK;
+}
+
+static void 
+ShaderManagerDeinit(Renderer *ren, 
+                   Shader_Manager *shaders)
+{
+  DictDestroyWithDestructor(shaders->dict, ren, ShaderDestroy);
+  shaderc_compiler_release(shaders->compiler);
+}
+
+static void
+ShaderDestroy(void *ud, String name, void *item)
+{
+  Renderer *ren = (Renderer *) ud;
+  Shader *shader = (Shader *) item;
+  vkDestroyShaderModule(ren->dev, shader->mod, ren->allocCbs);
+}
+
+static Shader *
+ShaderManagerOpen(Renderer *ren, 
+                  Shader_Manager *shaders, 
+                  String name, 
+                  Shader_Type type)
+{
+  Err_Code err;
+  String path;
+  Shader *shader, *iter;
+  Membuf buf;
+  VkResult vkErr;
+
+  shader = DictFind(shaders->dict, name);
+  if (shader != NULL)
+  {
+    return shader;
+  }
+
+  shader = DictInsertWithoutInit(shaders->dict, name);
+
+  path = StringConcat(ren->alloc, STRING_CSTR("shaders/"), name);
+
+  err = FsFileLoad(shaders->fs, path, &buf);
+  if (err)
+  {
+    goto fail;
+  }
+
+  shaderc_compilation_result_t result = 
+    shaderc_compile_into_spv(shaders->compiler, buf.data, buf.size, 
+        type == SHADER_VERT ? shaderc_glsl_vertex_shader 
+                            : shaderc_glsl_fragment_shader, 
+        name.buf, "main", NULL);
+
+  if (shaderc_result_get_compilation_status(result))
+  {
+    LOG_DEBUG_FMT("failed to compile shader: \n\n%s", 
+        shaderc_result_get_error_message(result));
+    return NULL;
+  }
+
+  shader->name = name;
+
+  VkShaderModuleCreateInfo createInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    .codeSize = shaderc_result_get_length(result),
+    .pCode = (u32 *) shaderc_result_get_bytes(result),
+  };
+
+  vkErr = vkCreateShaderModule(ren->dev, &createInfo, ren->allocCbs, 
+      &shader->mod);
+  if (vkErr)
+  {
+    return NULL;
+  }
+
+
+  shaderc_result_release(result);
+  FsFileDestroy(shaders->fs, &buf);
+
+  StringDestroy(ren->alloc, path);
+  return shader;
+
+fail:
+  StringDestroy(ren->alloc, path);
+  return NULL;
+}
+
+static Err_Code 
+TechniqueManagerInit(Renderer *ren, 
+                     Technique_Manager *techs)
+{
+  techs->dict = DICT_CREATE(ren->alloc, Technique, false);
+  return ERR_OK;
+}
+
+static void 
+TechniqueManagerDeinit(Renderer *ren, 
+                       Technique_Manager *techs)
+{
+  DictDestroyWithDestructor(techs->dict, ren, TechDestroy);
+}
+
+static void
+TechDestroy(void *ud, 
+            String name,
+            void *ptr)
+{
+  Renderer *ren = (Renderer *) ud;
+  Technique *tech = (Technique *) ptr;
+
+  vkDestroyPipeline(ren->dev, tech->pipeline, ren->allocCbs);
+  vkDestroyPipelineLayout(ren->dev, tech->layout, ren->allocCbs);
+  vkDestroyRenderPass(ren->dev, tech->fakePass, ren->allocCbs);
+}
+
+static Err_Code
+TechniqueManagerOpen(Renderer *ren, 
+                     Technique_Manager *techs, 
+                     String name)
+{
+  Err_Code err;
+  Membuf buf;
+  Parse_Result result;
+  Bson_Ast *ast;
+  Bson_Dict_Iterator iter;
+  Bson_Value *globals, *techDict;
+  String techName, path;
+
+  path = StringConcat(ren->alloc, STRING_CSTR("assets/"), name);
+
+  err = FsFileLoad(ren->fs, path, &buf);
+  if (err)
+  {
+    goto fail;
+  }
+
+  err = BsonAstParse(&ast, ren->alloc, &result, buf);
+  if (err)
+  {
+    goto fail;
+  }
+
+  globals = BsonAstGetValue(ast);
+
+  BsonDictIteratorCreate(globals, &iter);
+  while (BsonDictIteratorNext(&iter, &techName, &techDict))
+  {
+    Technique *tech;
+
+    tech = DictInsertWithoutInit(techs->dict, techName);
+
+    String vertStr, fragStr;
+    Bson_Value *vertName, *fragName;
+    vertName = BsonValueLookup(techDict, STRING_CSTR("vert"));
+    if (vertName == NULL)
+    {
+      LOG_DEBUG_FMT("failed to find vert shader in '%.*s'", 
+          (int) techName.len, techName.buf);
+      err = ERR_FAILED_PARSE;
+      goto fail;
+    }
+    fragName = BsonValueLookup(techDict, STRING_CSTR("frag"));
+    if (fragName == NULL)
+    {
+      LOG_DEBUG_FMT("failed to find frag shader in '%.*s'", 
+          (int) techName.len, techName.buf);
+      err = ERR_FAILED_PARSE;
+      goto fail;
+    }
+
+    vertStr = BsonValueGetString(vertName);
+    fragStr = BsonValueGetString(fragName);
+
+    Shader *vertShader, *fragShader;
+    vertShader = ShaderManagerOpen(ren, &ren->shaders, vertStr, SHADER_VERT);
+    fragShader = ShaderManagerOpen(ren, &ren->shaders, fragStr, SHADER_FRAG);
+
+    tech->vert = vertShader;
+    tech->frag = fragShader;
+
+    err = InitTechnique(ren, tech);
+    if (err)
+    {
+      return err;
+    }
+
+    LOG_DEBUG_FMT("loaded technique '%.*s'", (int) techName.len, techName.buf);
+  }
+  
+  BsonAstDestroy(ast, ren->alloc);
+  FsFileDestroy(ren->fs, &buf);
+  StringDestroy(ren->alloc, path);
+  return ERR_OK;
+
+fail:
+  StringDestroy(ren->alloc, path);
+  return err;
+}
+
+static Err_Code 
+InitTechnique(Renderer *ren, 
+              Technique *tech)
+{
+  VkResult vkErr;
+
+  VkDynamicState dynamicStates[] =
+  {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamicState =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = 2,
+    .pDynamicStates = dynamicStates,
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertexInputInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    .primitiveRestartEnable = VK_FALSE,
+  };
+
+  VkViewport viewport =
+  {
+    .x = 0.0f,
+    .y = 0.0f,
+    .width = (float) ren->swapchain.extent.width,
+    .height = (float) ren->swapchain.extent.height,
+    .minDepth = 0.0f,
+    .maxDepth = 1.0f,
+  };
+
+  VkRect2D scissor =
+  {
+    .offset = {0, 0},
+    .extent = ren->swapchain.extent,
+  };
+
+  VkPipelineViewportStateCreateInfo viewportState =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    .viewportCount = 1,
+    .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo rasterizer =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+    .depthClampEnable = VK_FALSE,
+    .rasterizerDiscardEnable = VK_FALSE,
+    .polygonMode = VK_POLYGON_MODE_FILL,
+    .lineWidth = 1.0f,
+    .cullMode = VK_CULL_MODE_BACK_BIT,
+    .frontFace = VK_FRONT_FACE_CLOCKWISE,
+    .depthBiasEnable = VK_FALSE,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisampler =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+    .sampleShadingEnable = VK_FALSE,
+    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineColorBlendAttachmentState colorBlendAttachment =
+  {
+
+    .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT 
+      | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    .blendEnable = VK_FALSE,
+  };
+
+  VkPipelineColorBlendStateCreateInfo colorBlend =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+    .logicOpEnable = VK_FALSE,
+    .attachmentCount = 1,
+    .pAttachments = &colorBlendAttachment,
+  };
+
+  VkPipelineLayoutCreateInfo pipelineLayoutInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+  };
+
+  vkErr = vkCreatePipelineLayout(ren->dev, &pipelineLayoutInfo, ren->allocCbs, 
+      &tech->layout);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  VkAttachmentDescription colorAttachment =
+  {
+    .format = ren->swapchain.format.format,
+    .samples = VK_SAMPLE_COUNT_1_BIT,
+    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+  };
+
+  VkAttachmentReference colorAttachmentRef =
+  {
+    .attachment = 0,
+    .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+  };
+
+  VkSubpassDescription subpass =
+  {
+    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &colorAttachmentRef,
+  };
+
+  VkSubpassDependency dependency =
+  {
+    .srcSubpass = VK_SUBPASS_EXTERNAL,
+    .dstSubpass = 0,
+    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    .srcAccessMask = 0,
+    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  };
+
+  VkRenderPassCreateInfo renderPassInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+    .attachmentCount = 1,
+    .pAttachments = &colorAttachment,
+    .subpassCount = 1,
+    .pSubpasses = &subpass,
+    .dependencyCount = 1,
+    .pDependencies = &dependency,
+  };
+
+  vkErr = vkCreateRenderPass(ren->dev, &renderPassInfo, ren->allocCbs, 
+      &tech->fakePass);
+  if (vkErr)
+  {
+    return ERR_OK;
+  }
+
+  VkPipelineShaderStageCreateInfo vertShaderStageInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+    .stage = VK_SHADER_STAGE_VERTEX_BIT,
+    .module = tech->vert->mod,
+    .pName = "main",
+  };
+
+  VkPipelineShaderStageCreateInfo fragShaderStageInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+    .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+    .module = tech->frag->mod,
+    .pName = "main",
+  };
+
+  VkPipelineShaderStageCreateInfo shaderStages[] = 
+  {
+    vertShaderStageInfo, fragShaderStageInfo
+  };
+
+  VkGraphicsPipelineCreateInfo pipelineInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    .stageCount = 2,
+    .pStages = shaderStages,
+    .pVertexInputState = &vertexInputInfo,
+    .pInputAssemblyState = &inputAssembly,
+    .pViewportState = &viewportState,
+    .pRasterizationState = &rasterizer,
+    .pMultisampleState = &multisampler,
+    .pColorBlendState = &colorBlend,
+    .pDynamicState = &dynamicState,
+    .layout = tech->layout,
+    .renderPass = tech->fakePass,
+    .subpass = 0,
+  };
+
+  vkErr = vkCreateGraphicsPipelines(ren->dev, VK_NULL_HANDLE, 1, &pipelineInfo,
+      ren->allocCbs, &tech->pipeline);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+}
+
+
+static Technique *
+TechniqueManagerLookup(Technique_Manager *techs, 
+                       String name)
+{
+  return DictFind(techs->dict, name);
+}
+
+static Err_Code 
+RenderGraphInit(Renderer *ren, 
+                Render_Graph *graph)
+{
+  VkResult vkErr;
+  Technique *tech;
+  graph->swapFbs = NEW_ARR(ren->alloc, VkFramebuffer, ren->swapchain.nImages, 
+      MEMORY_TAG_RENDERER);
+
+  tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
+  for (usize i = 0; i < ren->swapchain.nImages; i++)
+  {
+    VkImageView attachments[] =
+    {
+      ren->swapchain.imageViews[i],
+    };
+
+    VkFramebufferCreateInfo framebufferInfo = 
+    {
+      .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+      .renderPass = tech->fakePass,
+      .attachmentCount = 1,
+      .pAttachments = attachments,
+      .width = ren->swapchain.extent.width,
+      .height = ren->swapchain.extent.height,
+      .layers = 1,
+    };
+
+    vkErr = vkCreateFramebuffer(ren->dev, &framebufferInfo, ren->allocCbs, &graph->swapFbs[i]);
+    if (vkErr)
+    {
+      return ERR_LIBRARY_FAILURE;
+    }
+  }
+
+  VkCommandPoolCreateInfo poolInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .queueFamilyIndex = ren->queueInfo.graphicsFamily,
+  };
+
+  vkErr = vkCreateCommandPool(ren->dev, &poolInfo, ren->allocCbs, 
+      &graph->commandPool);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  VkCommandBufferAllocateInfo allocInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .commandPool = graph->commandPool,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandBufferCount = 1,
+  };
+
+  vkErr = vkAllocateCommandBuffers(ren->dev, &allocInfo, &graph->commandBuffer);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  VkSemaphoreCreateInfo semaphoreInfo = {
+    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+  };
+
+  VkFenceCreateInfo fenceInfo =
+  {
+    .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+  };
+
+
+  vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
+      &graph->imageAvailableSemaphore);
+  vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
+      &graph->renderFinishedSemaphore);
+  vkErr = vkCreateFence(ren->dev, &fenceInfo, ren->allocCbs, 
+      &graph->inFlightFence);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+}
+
+static void 
+RenderGraphDeinit(Renderer *ren, 
+                  Render_Graph *graph)
+{
+  for (usize i = 0; i < ren->swapchain.nImages; i++)
+  {
+    vkDestroyFramebuffer(ren->dev, graph->swapFbs[i], ren->allocCbs);
+  }
+
+  FREE_ARR(ren->alloc, graph->swapFbs, VkFramebuffer, ren->swapchain.nImages, 
+      MEMORY_TAG_RENDERER);
+
+  vkDestroyCommandPool(ren->dev, graph->commandPool, ren->allocCbs);
+
+  vkDestroySemaphore(ren->dev, graph->imageAvailableSemaphore, ren->allocCbs);
+  vkDestroySemaphore(ren->dev, graph->renderFinishedSemaphore, ren->allocCbs);
+  vkDestroyFence(ren->dev, graph->inFlightFence, ren->allocCbs);
+}
+
+static void 
+RenderGraphRecord(Renderer *ren, 
+                  Render_Graph *graph,
+                  u32 imageIndex)
+{
+  Technique *tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
+
+  VkResult vkErr;
+
+  VkCommandBufferBeginInfo beginInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+  };
+
+  vkErr = vkBeginCommandBuffer(graph->commandBuffer, &beginInfo);
+  if (vkErr)
+  {
+    LOG_ERROR("failed to begin command buffer");
+    return;
+  }
+
+  VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+
+  VkRenderPassBeginInfo renderPassInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    .renderPass = tech->fakePass,
+    .framebuffer = graph->swapFbs[imageIndex],
+    .renderArea =
+      {
+        .offset = {0, 0},
+        .extent = ren->swapchain.extent,
+      },
+    .clearValueCount = 1,
+    .pClearValues = &clearColor,
+  };
+
+  vkCmdBeginRenderPass(graph->commandBuffer, &renderPassInfo, 
+      VK_SUBPASS_CONTENTS_INLINE);
+
+  vkCmdBindPipeline(graph->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+      tech->pipeline);
+
+  VkViewport viewport =
+  {
+    .x = 0.0f,
+    .y = 0.0f,
+    .width = (float) ren->swapchain.extent.width,
+    .height = (float) ren->swapchain.extent.height,
+    .minDepth = 0.0f,
+    .maxDepth = 1.0f,
+  };
+
+  vkCmdSetViewport(graph->commandBuffer, 0, 1, &viewport);
+
+  VkRect2D scissor =
+  {
+    .offset = {0, 0},
+    .extent = ren->swapchain.extent,
+  };
+
+  vkCmdSetScissor(graph->commandBuffer, 0, 1, &scissor);
+
+  vkCmdDraw(graph->commandBuffer, 3, 1, 0, 0);
+
+  vkCmdEndRenderPass(graph->commandBuffer);
+
+  vkEndCommandBuffer(graph->commandBuffer);
+}

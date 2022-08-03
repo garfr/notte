@@ -14,6 +14,7 @@
 #include <notte/plat.h>
 #include <notte/renderer.h>
 #include <notte/bson.h>
+#include <notte/fs.h>
 
 int
 main()
@@ -25,6 +26,7 @@ main()
   Bson_Ast *ast;
   Membuf bsonBuf;
   Parse_Result result;
+  Fs_Driver fs;
 
   LogSetLevel(LOG_LEVEL_DEBUG);
 
@@ -34,7 +36,6 @@ main()
 
   Allocator libcAlloc = MemoryLoadLibcAllocator();
 
-
   err = PlatInit();
   if (err)
   {
@@ -42,6 +43,13 @@ main()
     return EXIT_FAILURE;
   }
   
+  err = FsDiskDriverCreate(&fs, libcAlloc, STRING_CSTR("../"));
+  if (err)
+  {
+    LOG_FATAL_CODE("failed to init Fs_Driver", err);
+    return EXIT_FAILURE;
+  }
+
   Plat_Window_Create_Info createInfo =
   {
     .w = 100,
@@ -60,6 +68,7 @@ main()
   {
     .win = win,
     .alloc = libcAlloc,
+    .fs = &fs,
   };
 
   err = RendererCreate(&rendererCreateInfo, &ren);
@@ -80,12 +89,19 @@ main()
           goto close;
       }
     }
+    err = RendererDraw(ren);
+    if (err)
+    {
+      LOG_FATAL_CODE("failed to draw", err);
+      return EXIT_FAILURE;
+    }
   }
 
 close:
 
   PlatWindowDestroy(win);
   RendererDestroy(ren);
+  FsDriverDestroy(&fs);
 
   MemoryPrintUsage();
   MemoryDeinit();
