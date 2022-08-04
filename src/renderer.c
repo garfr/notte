@@ -11,6 +11,9 @@
 #include <notte/membuf.h>
 #include <notte/bson.h>
 #include <notte/dict.h>
+#include <notte/math.h>
+
+#define MAX_FRAMES_IN_FLIGHT 2
 
 /* === TYPES === */
 
@@ -66,16 +69,17 @@ typedef struct
 
 typedef struct
 {
-  VkFramebuffer *swapFbs;
   VkCommandPool commandPool;
-  VkCommandBuffer commandBuffer;
-  VkSemaphore imageAvailableSemaphore;
-  VkSemaphore renderFinishedSemaphore;
-  VkFence inFlightFence;
+  VkCommandBuffer commandBuffers[MAX_FRAMES_IN_FLIGHT];
+  VkSemaphore imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT];
+  VkSemaphore renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT];
+  VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];
+  VkFramebuffer *swapFbs;
 } Render_Graph;
 
 struct Renderer
 {
+  uint32_t currentFrame;
   Plat_Window *win;
   VkAllocationCallbacks *allocCbs;
   VkInstance vk;
@@ -92,7 +96,18 @@ struct Renderer
   Shader_Manager shaders;
   Technique_Manager techs;
   Render_Graph graph;
+
+  VkBuffer vertexBuffer, indexBuffer;
+  VkDeviceMemory vertexBufferMemory, indexBufferMemory;
+
+  VkCommandPool utilPool;
 };
+
+typedef struct
+{
+  Vec2 pos;
+  Vec3 color;
+} Vertex;
 
 /* === MACROS === */
 
@@ -113,6 +128,41 @@ const char *requiredDeviceExtensions[] = {
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
+const Vertex vertices[] =
+{
+  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
+  {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}},
+};
+
+const u16 indices[] = {
+  0, 1, 2, 2, 3, 0,
+};
+
+VkVertexInputBindingDescription vertexBindingDescription =
+{
+  .binding = 0,
+  .stride = sizeof(Vertex),
+  .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+};
+
+VkVertexInputAttributeDescription vertexAttributeDescription[] =
+{
+  {
+    .binding = 0,
+    .location = 0,
+    .format = VK_FORMAT_R32G32_SFLOAT,
+    .offset = OFFSETOF(Vertex, pos),
+  },
+  {
+    .binding = 0,
+    .location = 1,
+    .format = VK_FORMAT_R32G32B32_SFLOAT,
+    .offset = OFFSETOF(Vertex, color),
+  },
+};
+
 /* === PROTOTYPES === */
 
 static Err_Code CreateInstance(Renderer *ren);
@@ -122,6 +172,7 @@ static bool DeviceIsSuitable(Renderer *ren, VkPhysicalDevice dev,
 static Err_Code CreateLogicalDevice(Renderer *ren);
 static Err_Code CreateSwapchain(Renderer *ren, Swapchain *swapchain);
 static void DestroySwapchain(Renderer *ren, Swapchain *swapchain);
+static Err_Code RebuildSwapchain(Renderer *ren);
 static Err_Code CreatePipeline(Renderer *ren);
 static Err_Code ShaderManagerInit(Renderer *ren, Shader_Manager *shaders);
 static Shader *ShaderManagerOpen(Renderer *ren, Shader_Manager *shaders, String path, 
@@ -138,6 +189,20 @@ static Err_Code RenderGraphInit(Renderer *ren, Render_Graph *graph);
 static void RenderGraphDeinit(Renderer *ren, Render_Graph *graph);
 static void RenderGraphRecord(Renderer *ren, Render_Graph *graph,
                   u32 imageIndex);
+static Err_Code CreateFramebuffers(Renderer *ren, Render_Graph *graph);
+static Err_Code CreateBuffers(Renderer *ren);
+static void DestroyBuffers(Renderer *ren);
+static uint32_t FindMemoryType(Renderer *ren, uint32_t typeFilter, 
+    VkMemoryPropertyFlags props);
+static Err_Code CreateBuffer(Renderer *ren, VkDeviceSize size, 
+    VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, 
+    VkBuffer *buffer, VkDeviceMemory *bufferMemory);
+static void DestroyBuffer(Renderer *ren, VkBuffer buffer, 
+    VkDeviceMemory memory);
+static void CopyBuffer(Renderer *ren, VkBuffer srcBuffer, VkBuffer dstBuffer, 
+    VkDeviceSize size);
+static Err_Code CreateCommandPools(Renderer *ren);
+static void DestroyCommandPools(Renderer *ren);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -153,6 +218,7 @@ RendererCreate(Renderer_Create_Info *createInfo,
   ren->allocCbs = NULL;
   ren->alloc = createInfo->alloc;
   ren->fs = createInfo->fs;
+  ren->currentFrame = 0;
 
   err = CreateInstance(ren);
   if (err)
@@ -190,6 +256,13 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created swapchain");
 
+  err = CreateCommandPools(ren);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created command pools");
+
   err = ShaderManagerInit(ren, &ren->shaders);
   if (err)
   {
@@ -218,6 +291,13 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created render graph");
 
+  err = CreateBuffers(ren);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created buffers");
+
   *renOut = ren;
   return ERR_OK;
 }
@@ -228,18 +308,31 @@ RendererDraw(Renderer *ren)
   VkResult vkErr;
   uint32_t imageIndex;
 
-  vkWaitForFences(ren->dev, 1, &ren->graph.inFlightFence, VK_TRUE, UINT64_MAX);
-  vkResetFences(ren->dev, 1, &ren->graph.inFlightFence);
-  vkAcquireNextImageKHR(ren->dev, ren->swapchain.swapchain, UINT64_MAX, 
-      ren->graph.imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+  vkWaitForFences(ren->dev, 1, &ren->graph.inFlightFences[ren->currentFrame], 
+      VK_TRUE, UINT64_MAX);
+  vkErr = vkAcquireNextImageKHR(ren->dev, ren->swapchain.swapchain, UINT64_MAX, 
+      ren->graph.imageAvailableSemaphores[ren->currentFrame], VK_NULL_HANDLE, 
+      &imageIndex);
+  if (vkErr == VK_ERROR_OUT_OF_DATE_KHR)
+  {
+    RebuildResize(ren);
+    return ERR_OK;
+  } else if (vkErr && vkErr != VK_SUBOPTIMAL_KHR)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
 
-  vkResetCommandBuffer(ren->graph.commandBuffer, 0);
+  vkResetFences(ren->dev, 1, &ren->graph.inFlightFences[ren->currentFrame]);
+
+  vkResetCommandBuffer(ren->graph.commandBuffers[ren->currentFrame], 0);
 
   RenderGraphRecord(ren, &ren->graph, imageIndex);
 
-  VkSemaphore waitSemaphores[] = {ren->graph.imageAvailableSemaphore};
+  VkSemaphore waitSemaphores[] = 
+    {ren->graph.imageAvailableSemaphores[ren->currentFrame]};
   VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-  VkSemaphore signalSemaphores[] = {ren->graph.renderFinishedSemaphore};
+  VkSemaphore signalSemaphores[] = 
+    {ren->graph.renderFinishedSemaphores[ren->currentFrame]};
 
   VkSubmitInfo submitInfo =
   {
@@ -248,13 +341,13 @@ RendererDraw(Renderer *ren)
     .pWaitSemaphores = waitSemaphores,
     .pWaitDstStageMask = waitStages,
     .commandBufferCount = 1,
-    .pCommandBuffers = &ren->graph.commandBuffer,
+    .pCommandBuffers = &ren->graph.commandBuffers[ren->currentFrame],
     .signalSemaphoreCount = 1,
     .pSignalSemaphores = signalSemaphores,
   };
 
   vkErr = vkQueueSubmit(ren->graphicsQueue, 1, &submitInfo, 
-      ren->graph.inFlightFence);
+      ren->graph.inFlightFences[ren->currentFrame]);
   if (vkErr)
   {
     return ERR_LIBRARY_FAILURE;
@@ -272,15 +365,28 @@ RendererDraw(Renderer *ren)
     .pImageIndices= &imageIndex,
   };
 
-  vkQueuePresentKHR(ren->presentQueue, &presentInfo);
+  vkErr = vkQueuePresentKHR(ren->presentQueue, &presentInfo);
+  if (vkErr == VK_ERROR_OUT_OF_DATE_KHR || vkErr == VK_SUBOPTIMAL_KHR)
+  {
+    RebuildResize(ren);
+  } else if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
 
+  ren->currentFrame = (ren->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
   return ERR_OK;
 }
 
 void 
 RendererDestroy(Renderer *ren)
 {
+  /* First finish all GPU work. */
   vkDeviceWaitIdle(ren->dev);
+
+  
+  DestroyCommandPools(ren);
+  DestroyBuffers(ren);
   RenderGraphDeinit(ren, &ren->graph);
   ShaderManagerDeinit(ren, &ren->shaders);
   TechniqueManagerDeinit(ren, &ren->techs);
@@ -966,6 +1072,10 @@ InitTechnique(Renderer *ren,
   VkPipelineVertexInputStateCreateInfo vertexInputInfo =
   {
     .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    .vertexBindingDescriptionCount = 1,
+    .vertexAttributeDescriptionCount = 2,
+    .pVertexBindingDescriptions = &vertexBindingDescription,
+    .pVertexAttributeDescriptions = vertexAttributeDescription,
   };
 
   VkPipelineInputAssemblyStateCreateInfo inputAssembly =
@@ -1155,8 +1265,7 @@ TechniqueManagerLookup(Technique_Manager *techs,
 }
 
 static Err_Code 
-RenderGraphInit(Renderer *ren, 
-                Render_Graph *graph)
+CreateFramebuffers(Renderer *ren, Render_Graph *graph)
 {
   VkResult vkErr;
   Technique *tech;
@@ -1182,11 +1291,28 @@ RenderGraphInit(Renderer *ren,
       .layers = 1,
     };
 
-    vkErr = vkCreateFramebuffer(ren->dev, &framebufferInfo, ren->allocCbs, &graph->swapFbs[i]);
+    vkErr = vkCreateFramebuffer(ren->dev, &framebufferInfo, ren->allocCbs, 
+        &graph->swapFbs[i]);
     if (vkErr)
     {
       return ERR_LIBRARY_FAILURE;
     }
+  }
+
+  return ERR_OK;
+}
+
+static Err_Code 
+RenderGraphInit(Renderer *ren, 
+                Render_Graph *graph)
+{
+  Err_Code err;
+  VkResult vkErr;
+
+  err = CreateFramebuffers(ren, graph);
+  if (err)
+  {
+    return err;
   }
 
   VkCommandPoolCreateInfo poolInfo =
@@ -1208,10 +1334,10 @@ RenderGraphInit(Renderer *ren,
     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
     .commandPool = graph->commandPool,
     .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-    .commandBufferCount = 1,
+    .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
   };
 
-  vkErr = vkAllocateCommandBuffers(ren->dev, &allocInfo, &graph->commandBuffer);
+  vkErr = vkAllocateCommandBuffers(ren->dev, &allocInfo, graph->commandBuffers);
   if (vkErr)
   {
     return ERR_LIBRARY_FAILURE;
@@ -1228,15 +1354,18 @@ RenderGraphInit(Renderer *ren,
   };
 
 
-  vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
-      &graph->imageAvailableSemaphore);
-  vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
-      &graph->renderFinishedSemaphore);
-  vkErr = vkCreateFence(ren->dev, &fenceInfo, ren->allocCbs, 
-      &graph->inFlightFence);
-  if (vkErr)
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
   {
-    return ERR_LIBRARY_FAILURE;
+    vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
+        &graph->imageAvailableSemaphores[i]);
+    vkErr = vkCreateSemaphore(ren->dev, &semaphoreInfo, ren->allocCbs, 
+        &graph->renderFinishedSemaphores[i]);
+    vkErr = vkCreateFence(ren->dev, &fenceInfo, ren->allocCbs, 
+        &graph->inFlightFences[i]);
+    if (vkErr)
+    {
+      return ERR_LIBRARY_FAILURE;
+    }
   }
 
   return ERR_OK;
@@ -1246,19 +1375,25 @@ static void
 RenderGraphDeinit(Renderer *ren, 
                   Render_Graph *graph)
 {
-  for (usize i = 0; i < ren->swapchain.nImages; i++)
-  {
-    vkDestroyFramebuffer(ren->dev, graph->swapFbs[i], ren->allocCbs);
-  }
-
-  FREE_ARR(ren->alloc, graph->swapFbs, VkFramebuffer, ren->swapchain.nImages, 
-      MEMORY_TAG_RENDERER);
 
   vkDestroyCommandPool(ren->dev, graph->commandPool, ren->allocCbs);
 
-  vkDestroySemaphore(ren->dev, graph->imageAvailableSemaphore, ren->allocCbs);
-  vkDestroySemaphore(ren->dev, graph->renderFinishedSemaphore, ren->allocCbs);
-  vkDestroyFence(ren->dev, graph->inFlightFence, ren->allocCbs);
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+  {
+    vkDestroySemaphore(ren->dev, graph->imageAvailableSemaphores[i], 
+        ren->allocCbs);
+    vkDestroySemaphore(ren->dev, graph->renderFinishedSemaphores[i], 
+        ren->allocCbs);
+    vkDestroyFence(ren->dev, graph->inFlightFences[i], ren->allocCbs);
+  }
+
+  for (usize i = 0; i < ren->swapchain.nImages; i++)
+  {
+    vkDestroyFramebuffer(ren->dev, ren->graph.swapFbs[i], ren->allocCbs);
+  }
+
+  FREE_ARR(ren->alloc, ren->graph.swapFbs, VkFramebuffer, ren->swapchain.nImages, 
+      MEMORY_TAG_RENDERER);
 }
 
 static void 
@@ -1267,6 +1402,7 @@ RenderGraphRecord(Renderer *ren,
                   u32 imageIndex)
 {
   Technique *tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
+  VkCommandBuffer buf = graph->commandBuffers[ren->currentFrame];
 
   VkResult vkErr;
 
@@ -1275,7 +1411,7 @@ RenderGraphRecord(Renderer *ren,
     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
   };
 
-  vkErr = vkBeginCommandBuffer(graph->commandBuffer, &beginInfo);
+  vkErr = vkBeginCommandBuffer(buf, &beginInfo);
   if (vkErr)
   {
     LOG_ERROR("failed to begin command buffer");
@@ -1298,11 +1434,17 @@ RenderGraphRecord(Renderer *ren,
     .pClearValues = &clearColor,
   };
 
-  vkCmdBeginRenderPass(graph->commandBuffer, &renderPassInfo, 
+  vkCmdBeginRenderPass(buf, &renderPassInfo, 
       VK_SUBPASS_CONTENTS_INLINE);
 
-  vkCmdBindPipeline(graph->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+  vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
       tech->pipeline);
+
+  VkBuffer vertexBuffers[] = {ren->vertexBuffer};
+  VkDeviceSize offsets[] = {0};
+
+  vkCmdBindVertexBuffers(buf, 0, 1, vertexBuffers, offsets);
+  vkCmdBindIndexBuffer(buf, ren->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
   VkViewport viewport =
   {
@@ -1314,7 +1456,7 @@ RenderGraphRecord(Renderer *ren,
     .maxDepth = 1.0f,
   };
 
-  vkCmdSetViewport(graph->commandBuffer, 0, 1, &viewport);
+  vkCmdSetViewport(buf, 0, 1, &viewport);
 
   VkRect2D scissor =
   {
@@ -1322,11 +1464,297 @@ RenderGraphRecord(Renderer *ren,
     .extent = ren->swapchain.extent,
   };
 
-  vkCmdSetScissor(graph->commandBuffer, 0, 1, &scissor);
+  vkCmdSetScissor(buf, 0, 1, &scissor);
 
-  vkCmdDraw(graph->commandBuffer, 3, 1, 0, 0);
+  vkCmdDrawIndexed(buf, 6, 1, 0, 0, 0);
 
-  vkCmdEndRenderPass(graph->commandBuffer);
+  vkCmdEndRenderPass(buf);
 
-  vkEndCommandBuffer(graph->commandBuffer);
+  vkEndCommandBuffer(buf);
+}
+
+static Err_Code
+RebuildRenderGraph(Renderer *ren)
+{
+  Err_Code err;
+
+  for (usize i = 0; i < ren->swapchain.nImages; i++)
+  {
+    vkDestroyFramebuffer(ren->dev, ren->graph.swapFbs[i], ren->allocCbs);
+  }
+
+  FREE_ARR(ren->alloc, ren->graph.swapFbs, VkFramebuffer, ren->swapchain.nImages, 
+      MEMORY_TAG_RENDERER);
+
+  err = CreateFramebuffers(ren, &ren->graph);
+  if (err)
+  {
+    return err;
+  }
+  return ERR_OK;
+}
+
+static Err_Code
+RebuildResize(Renderer *ren)
+{
+  Err_Code err;
+  err = RebuildSwapchain(ren);
+  if (err)
+  {
+    return err;
+  }
+
+  err = RebuildRenderGraph(ren);
+  if (err)
+  {
+    return err;
+  }
+
+  return ERR_OK;
+}
+
+static Err_Code 
+RebuildSwapchain(Renderer *ren)
+{
+  Swapchain new;
+  Err_Code err;
+
+  vkDeviceWaitIdle(ren->dev);
+
+  DestroySwapchain(ren, &ren->swapchain);
+
+  err = CreateSwapchain(ren, &new);
+  if (err)
+  {
+    return err;
+  }
+
+  ren->swapchain = new;
+
+  
+  return ERR_OK;
+}
+
+static Err_Code 
+CreateBuffers(Renderer *ren)
+{
+  Err_Code err;
+  void *data;
+  VkResult vkErr;
+  VkBuffer vStagingBuffer, iStagingBuffer;
+  VkDeviceMemory vStagingBufferMemory, iStagingBufferMemory;
+
+  VkDeviceSize vBufferSize = sizeof(vertices);
+  err = CreateBuffer(ren, vBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      &vStagingBuffer, &vStagingBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  vkMapMemory(ren->dev, vStagingBufferMemory, 0, vBufferSize, 0, &data);
+
+  MemoryCopy(data, vertices, (usize) vBufferSize);
+  vkUnmapMemory(ren->dev, vStagingBufferMemory);
+
+  err = CreateBuffer(ren, vBufferSize, 
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ren->vertexBuffer, &ren->vertexBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  CopyBuffer(ren, vStagingBuffer, ren->vertexBuffer, vBufferSize);
+
+  DestroyBuffer(ren, vStagingBuffer, vStagingBufferMemory);
+
+  VkDeviceSize iBufferSize = sizeof(indices);
+  err = CreateBuffer(ren, iBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      &iStagingBuffer, &iStagingBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  vkMapMemory(ren->dev, iStagingBufferMemory, 0, iBufferSize, 0, &data);
+
+  MemoryCopy(data, indices, (usize) iBufferSize);
+  vkUnmapMemory(ren->dev, iStagingBufferMemory);
+
+  err = CreateBuffer(ren, iBufferSize, 
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ren->indexBuffer, 
+      &ren->indexBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  CopyBuffer(ren, iStagingBuffer, ren->indexBuffer, iBufferSize);
+
+  DestroyBuffer(ren, iStagingBuffer, iStagingBufferMemory);
+
+  return ERR_OK;
+}
+
+static void
+DestroyBuffers(Renderer *ren)
+{
+  DestroyBuffer(ren, ren->vertexBuffer, ren->vertexBufferMemory);
+  DestroyBuffer(ren, ren->indexBuffer, ren->indexBufferMemory);
+}
+
+static uint32_t 
+FindMemoryType(Renderer *ren, uint32_t typeFilter, VkMemoryPropertyFlags props)
+{
+  VkPhysicalDeviceMemoryProperties memProperties;
+  vkGetPhysicalDeviceMemoryProperties(ren->pDev, &memProperties);
+
+  for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+  {
+    if (typeFilter & (1 << i) && (memProperties.memoryTypes[i].propertyFlags & props) == props)
+    {
+      return i;
+    }
+  }
+
+  LOG_ERROR("failed to find suitable memory type");
+  return 0;
+}
+
+static Err_Code
+CreateBuffer(Renderer *ren, 
+             VkDeviceSize size, 
+             VkBufferUsageFlags usage, 
+             VkMemoryPropertyFlags properties, 
+             VkBuffer *buffer, 
+             VkDeviceMemory *bufferMemory)
+{
+  VkResult vkErr;
+  VkMemoryRequirements memRequirements;
+
+  VkBufferCreateInfo bufferInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size = size,
+    .usage = usage,
+    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+
+  vkErr = vkCreateBuffer(ren->dev, &bufferInfo, ren->allocCbs, buffer);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  vkGetBufferMemoryRequirements(ren->dev, *buffer, &memRequirements);
+
+  VkMemoryAllocateInfo allocInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    .allocationSize = memRequirements.size,
+    .memoryTypeIndex = FindMemoryType(ren, memRequirements.memoryTypeBits, 
+        properties),
+  };
+
+  vkErr = vkAllocateMemory(ren->dev, &allocInfo, ren->allocCbs, bufferMemory);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  vkBindBufferMemory(ren->dev, *buffer, *bufferMemory, 0);
+
+  return ERR_OK;
+}
+
+static void 
+CopyBuffer(Renderer *ren,
+           VkBuffer srcBuffer, 
+           VkBuffer dstBuffer, 
+           VkDeviceSize size)
+{
+  VkCommandBuffer commandBuffer;
+
+  VkCommandBufferAllocateInfo allocInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandPool = ren->utilPool,
+    .commandBufferCount = 1,
+  };
+
+  vkAllocateCommandBuffers(ren->dev, &allocInfo, &commandBuffer);
+
+  VkCommandBufferBeginInfo beginInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+
+  vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+  VkBufferCopy copyRegion = 
+  {
+    .srcOffset = 0,
+    .dstOffset = 0,
+    .size = size,
+  };
+
+  vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+  vkEndCommandBuffer(commandBuffer);
+
+  VkSubmitInfo submitInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .commandBufferCount = 1,
+    .pCommandBuffers = &commandBuffer,
+  };
+
+  vkQueueSubmit(ren->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+  vkQueueWaitIdle(ren->graphicsQueue);
+
+  vkFreeCommandBuffers(ren->dev, ren->utilPool, 1, &commandBuffer);
+}
+
+static Err_Code 
+CreateCommandPools(Renderer *ren)
+{
+  VkResult vkErr;
+  VkCommandBuffer commandBuffer;
+
+  VkCommandPoolCreateInfo poolInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .queueFamilyIndex = ren->queueInfo.graphicsFamily,
+  };
+
+  vkErr = vkCreateCommandPool(ren->dev, &poolInfo, ren->allocCbs, 
+      &ren->utilPool);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+}
+
+static void
+DestroyCommandPools(Renderer *ren)
+{
+  vkDestroyCommandPool(ren->dev, ren->utilPool, ren->allocCbs);
+}
+
+static void 
+DestroyBuffer(Renderer *ren, 
+              VkBuffer buffer, 
+              VkDeviceMemory memory)
+{
+  vkDestroyBuffer(ren->dev, buffer, ren->allocCbs);
+  vkFreeMemory(ren->dev, memory, ren->allocCbs);
 }

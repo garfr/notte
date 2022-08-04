@@ -55,4 +55,6 @@ typedef struct
 #define NOTTE_MAX_ALIGN alignof(max_align_t)
 #endif
 
+#define OFFSETOF(_type, _memb) ((usize) (&((_type *) (NULL))->_memb))
+
 #endif /* NOTTE_DEFS_H */
