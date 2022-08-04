@@ -56,5 +56,6 @@ typedef struct
 #endif
 
 #define OFFSETOF(_type, _memb) ((usize) (&((_type *) (NULL))->_memb))
+#define ELEMOF(_arr) ((usize) (sizeof(_arr) / sizeof(_arr[0])))
 
 #endif /* NOTTE_DEFS_H */

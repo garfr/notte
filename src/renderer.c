@@ -11,11 +11,19 @@
 #include <notte/membuf.h>
 #include <notte/bson.h>
 #include <notte/dict.h>
-#include <notte/math.h>
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
 /* === TYPES === */
+
+struct Static_Mesh
+{
+  const Vertex *verts;
+  const u16 *indices;
+  usize nVerts, nIndices;
+  VkBuffer vertexBuffer, indexBuffer;
+  VkDeviceMemory vertexMemory, indexMemory;
+};
 
 typedef struct
 {
@@ -97,17 +105,10 @@ struct Renderer
   Technique_Manager techs;
   Render_Graph graph;
 
-  VkBuffer vertexBuffer, indexBuffer;
-  VkDeviceMemory vertexBufferMemory, indexBufferMemory;
+  Static_Mesh *mesh;
 
   VkCommandPool utilPool;
 };
-
-typedef struct
-{
-  Vec2 pos;
-  Vec3 color;
-} Vertex;
 
 /* === MACROS === */
 
@@ -126,18 +127,6 @@ const char *requiredExtensions[] = {
 
 const char *requiredDeviceExtensions[] = {
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-};
-
-const Vertex vertices[] =
-{
-  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-  {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}},
-};
-
-const u16 indices[] = {
-  0, 1, 2, 2, 3, 0,
 };
 
 VkVertexInputBindingDescription vertexBindingDescription =
@@ -190,8 +179,6 @@ static void RenderGraphDeinit(Renderer *ren, Render_Graph *graph);
 static void RenderGraphRecord(Renderer *ren, Render_Graph *graph,
                   u32 imageIndex);
 static Err_Code CreateFramebuffers(Renderer *ren, Render_Graph *graph);
-static Err_Code CreateBuffers(Renderer *ren);
-static void DestroyBuffers(Renderer *ren);
 static uint32_t FindMemoryType(Renderer *ren, uint32_t typeFilter, 
     VkMemoryPropertyFlags props);
 static Err_Code CreateBuffer(Renderer *ren, VkDeviceSize size, 
@@ -291,13 +278,6 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created render graph");
 
-  err = CreateBuffers(ren);
-  if (err)
-  {
-    return err;
-  }
-  LOG_DEBUG("created buffers");
-
   *renOut = ren;
   return ERR_OK;
 }
@@ -384,9 +364,7 @@ RendererDestroy(Renderer *ren)
   /* First finish all GPU work. */
   vkDeviceWaitIdle(ren->dev);
 
-  
   DestroyCommandPools(ren);
-  DestroyBuffers(ren);
   RenderGraphDeinit(ren, &ren->graph);
   ShaderManagerDeinit(ren, &ren->shaders);
   TechniqueManagerDeinit(ren, &ren->techs);
@@ -395,6 +373,102 @@ RendererDestroy(Renderer *ren)
   vkDestroyDevice(ren->dev, ren->allocCbs);
   vkDestroyInstance(ren->vk, ren->allocCbs);
   FREE(ren->alloc, ren, Renderer, MEMORY_TAG_RENDERER);
+}
+
+Err_Code 
+RendererCreateStaticMesh(Renderer *ren, 
+                         Static_Mesh_Create_Info *createInfo, 
+                         Static_Mesh **meshOut)
+{
+  Err_Code err;
+  void *data;
+  VkResult vkErr;
+  VkBuffer vStagingBuffer, iStagingBuffer;
+  VkDeviceMemory vStagingBufferMemory, iStagingBufferMemory;
+  VkDeviceSize vBufferSize, iBufferSize;
+
+  Static_Mesh *mesh = NEW(ren->alloc, Static_Mesh, MEMORY_TAG_RENDERER);
+
+  mesh->nVerts = createInfo->nVerts;
+  mesh->nIndices = createInfo->nIndices;
+  Vertex *verts = NEW_ARR(ren->alloc, Vertex, mesh->nVerts, MEMORY_TAG_ARRAY);
+  MemoryCopy(verts, createInfo->verts, sizeof(Vertex) * mesh->nVerts);
+  u16 *indices = NEW_ARR(ren->alloc, u16, mesh->nIndices, MEMORY_TAG_ARRAY);
+  MemoryCopy(indices, createInfo->indices, sizeof(u16) * mesh->nIndices);
+  mesh->verts = verts;
+  mesh->indices = indices;
+
+
+  vBufferSize = sizeof(Vertex) * mesh->nVerts;
+  err = CreateBuffer(ren, vBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      &vStagingBuffer, &vStagingBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  vkMapMemory(ren->dev, vStagingBufferMemory, 0, vBufferSize, 0, &data);
+
+  MemoryCopy(data, mesh->verts, (usize) vBufferSize);
+  vkUnmapMemory(ren->dev, vStagingBufferMemory);
+
+  err = CreateBuffer(ren, vBufferSize, 
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &mesh->vertexBuffer, 
+      &mesh->vertexMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  CopyBuffer(ren, vStagingBuffer, mesh->vertexBuffer, vBufferSize);
+
+  DestroyBuffer(ren, vStagingBuffer, vStagingBufferMemory);
+
+  iBufferSize = sizeof(u16) * mesh->nIndices;
+  err = CreateBuffer(ren, iBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      &iStagingBuffer, &iStagingBufferMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  vkMapMemory(ren->dev, iStagingBufferMemory, 0, iBufferSize, 0, &data);
+
+  MemoryCopy(data, mesh->indices, (usize) iBufferSize);
+  vkUnmapMemory(ren->dev, iStagingBufferMemory);
+
+  err = CreateBuffer(ren, iBufferSize, 
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &mesh->indexBuffer, 
+      &mesh->indexMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  CopyBuffer(ren, iStagingBuffer, mesh->indexBuffer, iBufferSize);
+
+  DestroyBuffer(ren, iStagingBuffer, iStagingBufferMemory);
+
+  ren->mesh = mesh;
+  *meshOut = mesh;
+
+  return ERR_OK;
+}
+
+void 
+RendererDestroyStaticMesh(Renderer *ren, 
+                          Static_Mesh *mesh)
+{
+  vkDeviceWaitIdle(ren->dev);
+  FREE_ARR(ren->alloc, (void *) mesh->verts, Vertex, mesh->nVerts, MEMORY_TAG_ARRAY);
+  FREE_ARR(ren->alloc, (void *) mesh->indices, u16, mesh->nIndices, MEMORY_TAG_ARRAY);
+  DestroyBuffer(ren, mesh->vertexBuffer, mesh->vertexMemory);
+  DestroyBuffer(ren, mesh->indexBuffer, mesh->indexMemory);
+  FREE(ren->alloc, mesh, Static_Mesh, MEMORY_TAG_RENDERER);
 }
 
 /* === PRIVATE FUNCTIONS === */
@@ -1440,11 +1514,11 @@ RenderGraphRecord(Renderer *ren,
   vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
       tech->pipeline);
 
-  VkBuffer vertexBuffers[] = {ren->vertexBuffer};
+  VkBuffer vertexBuffers[] = {ren->mesh->vertexBuffer};
   VkDeviceSize offsets[] = {0};
 
   vkCmdBindVertexBuffers(buf, 0, 1, vertexBuffers, offsets);
-  vkCmdBindIndexBuffer(buf, ren->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+  vkCmdBindIndexBuffer(buf, ren->mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
   VkViewport viewport =
   {
@@ -1466,7 +1540,7 @@ RenderGraphRecord(Renderer *ren,
 
   vkCmdSetScissor(buf, 0, 1, &scissor);
 
-  vkCmdDrawIndexed(buf, 6, 1, 0, 0, 0);
+  vkCmdDrawIndexed(buf, ren->mesh->nIndices, 1, 0, 0, 0);
 
   vkCmdEndRenderPass(buf);
 
@@ -1533,78 +1607,6 @@ RebuildSwapchain(Renderer *ren)
 
   
   return ERR_OK;
-}
-
-static Err_Code 
-CreateBuffers(Renderer *ren)
-{
-  Err_Code err;
-  void *data;
-  VkResult vkErr;
-  VkBuffer vStagingBuffer, iStagingBuffer;
-  VkDeviceMemory vStagingBufferMemory, iStagingBufferMemory;
-
-  VkDeviceSize vBufferSize = sizeof(vertices);
-  err = CreateBuffer(ren, vBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      &vStagingBuffer, &vStagingBufferMemory);
-  if (err)
-  {
-    return err;
-  }
-
-  vkMapMemory(ren->dev, vStagingBufferMemory, 0, vBufferSize, 0, &data);
-
-  MemoryCopy(data, vertices, (usize) vBufferSize);
-  vkUnmapMemory(ren->dev, vStagingBufferMemory);
-
-  err = CreateBuffer(ren, vBufferSize, 
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ren->vertexBuffer, &ren->vertexBufferMemory);
-  if (err)
-  {
-    return err;
-  }
-
-  CopyBuffer(ren, vStagingBuffer, ren->vertexBuffer, vBufferSize);
-
-  DestroyBuffer(ren, vStagingBuffer, vStagingBufferMemory);
-
-  VkDeviceSize iBufferSize = sizeof(indices);
-  err = CreateBuffer(ren, iBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      &iStagingBuffer, &iStagingBufferMemory);
-  if (err)
-  {
-    return err;
-  }
-
-  vkMapMemory(ren->dev, iStagingBufferMemory, 0, iBufferSize, 0, &data);
-
-  MemoryCopy(data, indices, (usize) iBufferSize);
-  vkUnmapMemory(ren->dev, iStagingBufferMemory);
-
-  err = CreateBuffer(ren, iBufferSize, 
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ren->indexBuffer, 
-      &ren->indexBufferMemory);
-  if (err)
-  {
-    return err;
-  }
-
-  CopyBuffer(ren, iStagingBuffer, ren->indexBuffer, iBufferSize);
-
-  DestroyBuffer(ren, iStagingBuffer, iStagingBufferMemory);
-
-  return ERR_OK;
-}
-
-static void
-DestroyBuffers(Renderer *ren)
-{
-  DestroyBuffer(ren, ren->vertexBuffer, ren->vertexBufferMemory);
-  DestroyBuffer(ren, ren->indexBuffer, ren->indexBufferMemory);
 }
 
 static uint32_t 

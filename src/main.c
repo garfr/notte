@@ -16,6 +16,22 @@
 #include <notte/bson.h>
 #include <notte/fs.h>
 
+/* === GLOBALS === */
+
+const Vertex verts[] =
+{
+  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
+  {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}},
+};
+
+const u16 indices[] = {
+  0, 1, 2, 2, 3, 0,
+};
+
+/* === PUBLIC FUNCTIONS === */
+
 int
 main()
 {
@@ -27,6 +43,7 @@ main()
   Membuf bsonBuf;
   Parse_Result result;
   Fs_Driver fs;
+  Static_Mesh *square;
 
   LogSetLevel(LOG_LEVEL_DEBUG);
 
@@ -78,6 +95,21 @@ main()
     return EXIT_FAILURE;
   }
 
+  Static_Mesh_Create_Info squareCreateInfo = 
+  {
+    .verts = verts, 
+    .indices = indices,
+    .nVerts = ELEMOF(verts),
+    .nIndices = ELEMOF(indices),
+  };
+
+  err = RendererCreateStaticMesh(ren, &squareCreateInfo, &square);
+  if (err)
+  {
+    LOG_FATAL_CODE("failed to create square mesh", err);
+    return EXIT_FAILURE;
+  }
+
   while (1)
   {
     PlatWindowPumpEvents(win);
@@ -99,6 +131,7 @@ main()
 
 close:
 
+  RendererDestroyStaticMesh(ren, square);
   PlatWindowDestroy(win);
   RendererDestroy(ren);
   FsDriverDestroy(&fs);
