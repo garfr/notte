@@ -21,6 +21,7 @@ typedef enum
   MEMORY_TAG_DICT,
   MEMORY_TAG_BSON,
   MEMORY_TAG_FS,
+  MEMORY_TAG_THREAD,
   MEMORY_TAG_ALLOC, /* For allocators. */
   MEMORY_TAG_TAG_COUNT,
 } Memory_Tag;

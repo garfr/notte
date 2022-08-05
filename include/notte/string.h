@@ -25,6 +25,7 @@ bool StringEqual(String str1, String str2);
 String StringConcat(Allocator alloc, String s1, String s2);
 char *StringConcatIntoCString(Allocator alloc, String s1, String s2, 
     usize *sizeOut);
+char *StringMakeCString(Allocator alloc, String str);
 void StringDestroy(Allocator alloc, String str);
 
 u32 StringHash(String str);

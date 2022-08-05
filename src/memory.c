@@ -34,6 +34,7 @@ memoryTagToStr[] = {
   [MEMORY_TAG_RENDERER] = "RENDERER",
   [MEMORY_TAG_ALLOC]    = "ALLOC   ",
   [MEMORY_TAG_BSON]     = "BSON    ",
+  [MEMORY_TAG_THREAD]   = "THREAD  ",
   [MEMORY_TAG_FS]       = "FS      ",
 };
 

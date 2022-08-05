@@ -65,4 +65,17 @@ VectorDestroy(Vector *vec, Allocator alloc)
   vec->elemSize = vec->elemsUsed = vec->elemsAlloc = 0;
 }
 
+
+NOTTE_INLINE void *
+VectorIdx(Vector *vec, int idx)
+{
+  return vec->buf + (idx * vec->elemSize);
+}
+
+NOTTE_INLINE void
+VectorEmpty(Vector *vec)
+{
+  vec->elemsUsed = 0;
+}
+
 #endif /* NOTTE_VECTOR_H */

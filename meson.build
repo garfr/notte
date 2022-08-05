@@ -15,6 +15,10 @@ src = [
   'src/dict.c',
   'src/string.c',
   'src/fs.c',
+  'src/material.c',
+  'src/render_graph.c',
+  'src/vk_mem.c',
+  'src/thread.c',
 ]
 
 cc = meson.get_compiler('c')

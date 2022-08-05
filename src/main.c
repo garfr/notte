@@ -110,6 +110,11 @@ main()
     return EXIT_FAILURE;
   }
 
+  Transform trans = 
+  {
+    .pos = {0.0f, 0.0f, 0.0f},
+  };
+
   while (1)
   {
     PlatWindowPumpEvents(win);
@@ -121,6 +126,7 @@ main()
           goto close;
       }
     }
+    RendererDrawStaticMesh(ren, square, trans);
     err = RendererDraw(ren);
     if (err)
     {

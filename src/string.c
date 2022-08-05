@@ -110,3 +110,12 @@ StringDestroy(Allocator alloc,
   FREE_ARR(alloc, (u8 *) str.buf, u8, str.len, MEMORY_TAG_STRING);
 }
 
+
+char *
+StringMakeCString(Allocator alloc, String str)
+{
+  char *cStr = NEW_ARR(alloc, char, str.len + 1, MEMORY_TAG_STRING);
+  MemoryCopy(cStr, str.buf, str.len);
+  cStr[str.len] = '\0';
+  return cStr;
+}

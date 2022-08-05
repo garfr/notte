@@ -15,6 +15,14 @@
     _steal)
 
 typedef struct Dict Dict;
+
+typedef struct
+{
+  Dict *dict;
+  void *entry;
+  usize idx;
+} Dict_Iterator;
+
 typedef void (*Dict_Destructor_Fn)(void *ud, String name, void *item);
 
 Dict *DictCreate(Allocator alloc, usize itemSize, bool stealStings);
@@ -25,5 +33,8 @@ void *DictFind(Dict *dict, String key);
 
 void DictDestroy(Dict *dict);
 void DictDestroyWithDestructor(Dict *dict, void *ud, Dict_Destructor_Fn fn);
+
+void DictIteratorInit(Dict *dict, Dict_Iterator *iter);
+bool DictIteratorNext(Dict_Iterator *iter, String *str, void **ud);
 
 #endif /* NOTTE_DICT_H */

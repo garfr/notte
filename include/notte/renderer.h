@@ -28,6 +28,11 @@ typedef struct
   Vec3 color;
 } Vertex;
 
+typedef struct
+{
+  Vec3 pos;
+} Transform;
+
 /* The ownership of both verts and indices are taken. */
 typedef struct
 {
@@ -45,5 +50,7 @@ void RendererDestroy(Renderer *ren);
 Err_Code RendererCreateStaticMesh(Renderer *ren, 
     Static_Mesh_Create_Info *createInfo, Static_Mesh **mesh);
 void RendererDestroyStaticMesh(Renderer *ren, Static_Mesh *mesh);
+
+void RendererDrawStaticMesh(Renderer *ren, Static_Mesh *mesh, Transform transform);
 
 #endif /* NOTTE_RENDERER_H */

@@ -36,4 +36,25 @@ void FsFileDestroy(Fs_Driver *driver, Membuf *buf);
 
 void FsDriverDestroy(Fs_Driver *driver);
 
+typedef struct Fs_Dir_Monitor Fs_Dir_Monitor;
+
+typedef enum
+{
+  FS_DIR_MONITOR_EVENT_CREATE,
+  FS_DIR_MONITOR_EVENT_DELETE,
+  FS_DIR_MONITOR_EVENT_MOVE,
+  FS_DIR_MONITOR_EVENT_MODIFY,
+} Fs_Dir_Monitor_Event_Type;
+
+typedef struct
+{
+  Fs_Dir_Monitor_Event_Type t;
+  String path;
+} Fs_Dir_Monitor_Event;
+
+Err_Code FsDirMonitorCreate(Allocator alloc, String rootPath,
+    Fs_Dir_Monitor **monOut);
+void FsDirMonitorDestroy(Fs_Dir_Monitor *mon);
+Fs_Dir_Monitor_Event *FsDirMonitorGetEvents(Fs_Dir_Monitor *mon, usize *size);
+
 #endif /* NOTTE_FS_H */

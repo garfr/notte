@@ -153,3 +153,35 @@ DictDestroyWithDestructor(Dict *dict,
       MEMORY_TAG_DICT);
   FREE(dict->alloc, dict, Dict, MEMORY_TAG_DICT);
 }
+
+void 
+DictIteratorInit(Dict *dict, 
+                 Dict_Iterator *iter)
+{
+  iter->dict = dict;
+  iter->idx = 0;
+  iter->entry = dict->buckets[0];
+}
+
+bool 
+DictIteratorNext(Dict_Iterator *iter,
+                 String *key, 
+                 void **val)
+{
+  while (iter->entry == NULL)
+  {
+    iter->idx++;
+    if (iter->idx == iter->dict->nBuckets)
+    {
+      return false;
+    }
+    iter->entry = iter->dict->buckets[iter->idx];
+  }
+
+  Dict_Entry *entry = iter->entry;
+  *key = entry->key;
+  *val = entry->val;
+  iter->entry = entry->next;
+
+  return true;
+}
