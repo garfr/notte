@@ -22,6 +22,7 @@ void ThreadDestroy(Allocator alloc, Thread *thread);
 Err_Code MutexCreate(Allocator alloc, Mutex **mutexOut);
 void MutexDestroy(Allocator alloc, Mutex *mutex);
 void MutexAcquire(Mutex *mutex);
+bool MutexTryAcquire(Mutex *mutex);
 void MutexRelease(Mutex *mutex);
 
 #endif /* NOTTE_THREAD_H */

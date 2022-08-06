@@ -239,7 +239,12 @@ FsDirMonitorThread(void *ud)
 
   while (!mon->shouldQuit)
   {
-    MutexAcquire(mon->mutex);
+    if (!MutexTryAcquire(mon->mutex))
+    {
+      Sleep(10);
+      continue;
+    }
+
     result = WaitForSingleObject(mon->overlapped.hEvent, 10);
     if (result != WAIT_TIMEOUT)
     {
@@ -284,6 +289,7 @@ FsDirMonitorThread(void *ud)
     }
 
     MutexRelease(mon->mutex);
+    Sleep(10);
   }
 
   StringDestroy(mon->alloc, mon->rootPath);

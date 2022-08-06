@@ -235,6 +235,71 @@ TechniqueInit(Renderer *ren,
               Technique *tech)
 {
   VkResult vkErr;
+  VkDescriptorSetLayout descriptorLayouts[MAX_FRAMES_IN_FLIGHT];
+
+  VkDescriptorSetLayoutBinding uboBinding = 
+  {
+    .binding = 0,
+    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    .descriptorCount = 1,
+    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+  };
+
+  VkDescriptorSetLayoutCreateInfo layoutInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+    .bindingCount = 1,
+    .pBindings = &uboBinding,
+  };
+
+  vkErr = vkCreateDescriptorSetLayout(ren->dev, &layoutInfo, ren->allocCbs, 
+      &tech->descriptorLayout);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+  {
+    descriptorLayouts[i] = tech->descriptorLayout;
+  }
+
+  VkDescriptorSetAllocateInfo descriptorSetInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+    .descriptorPool = ren->descriptorPool,
+    .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+    .pSetLayouts = descriptorLayouts,
+  };
+
+  vkErr = vkAllocateDescriptorSets(ren->dev, &descriptorSetInfo, 
+      tech->descriptorSets);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+  {
+    VkDescriptorBufferInfo bufferInfo = 
+    {
+      .buffer = ren->uniformBuffers[i],
+      .offset = 0,
+      .range = sizeof(Camera_Uniform),
+    };
+
+    VkWriteDescriptorSet descriptorWrite =
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = tech->descriptorSets[i],
+      .dstBinding = 0,
+      .dstArrayElement = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorCount = 1,
+      .pBufferInfo = &bufferInfo,
+    };
+
+    vkUpdateDescriptorSets(ren->dev, 1, &descriptorWrite, 0, NULL);
+  }
 
   VkDynamicState dynamicStates[] =
   {
@@ -295,8 +360,9 @@ TechniqueInit(Renderer *ren,
     .rasterizerDiscardEnable = VK_FALSE,
     .polygonMode = VK_POLYGON_MODE_FILL,
     .lineWidth = 1.0f,
-    .cullMode = VK_CULL_MODE_BACK_BIT,
-    .frontFace = VK_FRONT_FACE_CLOCKWISE,
+    //.cullMode = VK_CULL_MODE_BACK_BIT,
+    .cullMode = VK_CULL_MODE_NONE,
+    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
     .depthBiasEnable = VK_FALSE,
   };
 
@@ -323,9 +389,20 @@ TechniqueInit(Renderer *ren,
     .pAttachments = &colorBlendAttachment,
   };
 
+  VkPushConstantRange pushConstant = 
+  {
+    .offset = 0,
+    .size = sizeof(Mesh_Push_Constant),
+    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+  };
+
   VkPipelineLayoutCreateInfo pipelineLayoutInfo = 
   {
     .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    .setLayoutCount = 1,
+    .pSetLayouts = &tech->descriptorLayout,
+    .pushConstantRangeCount = 1,
+    .pPushConstantRanges = &pushConstant,
   };
 
   vkErr = vkCreatePipelineLayout(ren->dev, &pipelineLayoutInfo, ren->allocCbs, 
@@ -463,6 +540,7 @@ TechDestroy(void *ud,
   Renderer *ren = (Renderer *) ud;
   Technique *tech = (Technique *) ptr;
 
+  vkDestroyDescriptorSetLayout(ren->dev, tech->descriptorLayout, ren->allocCbs);
   vkDestroyPipeline(ren->dev, tech->pipeline, ren->allocCbs);
   vkDestroyPipelineLayout(ren->dev, tech->layout, ren->allocCbs);
   vkDestroyRenderPass(ren->dev, tech->fakePass, ren->allocCbs);

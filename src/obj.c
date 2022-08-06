@@ -100,22 +100,22 @@ StaticModelLoadObj(Allocator alloc,
     switch (cmd->t)
     {
       case OBJ_CMD_V:
-        pos[posIdx++] = Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2]);
+        Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2], pos[posIdx++]);
         break;
       case OBJ_CMD_VN:
-        nor[norIdx++] = Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2]);
+        Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2], nor[norIdx++]);
         break;
       case OBJ_CMD_VT:
-        tex[texIdx++] = Vec2Create(cmd->v[0], cmd->v[1]);
+        Vec2Create(cmd->v[0], cmd->v[1], tex[texIdx++]);
         break;
       case OBJ_CMD_F:
       {
         for (u32 i = 0; i < cmd->indices.verts; i++)
         {
           Static_Vert vert;
-          vert.pos = pos[cmd->indices.pos[i] - 1];
-          vert.nor = nor[cmd->indices.nor[i] - 1];
-          vert.tex = tex[cmd->indices.tex[i]- 1];
+          Vec3Copy(pos[cmd->indices.pos[i] - 1], vert.pos);
+          Vec3Copy(nor[cmd->indices.nor[i] - 1], vert.nor);
+          Vec2Copy(tex[cmd->indices.tex[i] - 1], vert.tex);
           for (usize j = 0; j < vertIdx; j++)
           {
             if (StaticVertEqual(vert, verts[j]))

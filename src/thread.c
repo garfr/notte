@@ -81,6 +81,12 @@ MutexRelease(Mutex *mutex)
   LeaveCriticalSection(&mutex->cr);
 }
 
+bool 
+MutexTryAcquire(Mutex *mutex)
+{
+  return TryEnterCriticalSection(&mutex->cr);
+}
+
 /* === PRIVATE FUNCTIONS === */
 
 static DWORD WINAPI

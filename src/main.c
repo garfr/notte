@@ -110,13 +110,35 @@ main()
     return EXIT_FAILURE;
   }
 
+  Camera *cam;
+  err = RendererCreateCamera(ren, &cam);
+  if (err)
+  {
+    LOG_FATAL_CODE("failed to create camera", err);
+    return EXIT_FAILURE;
+  }
+  LOG_DEBUG("created camera");
+
+  Transform camTrans = 
+  {
+    .pos = {2.0, 2.0, 2.0},
+  };
+  RendererSetCameraTransform(ren, cam, camTrans);
+  RendererSetCameraActive(ren, cam);
+
+  f64 baseTime = PlatGetTime();
+
   Transform trans = 
   {
     .pos = {0.0f, 0.0f, 0.0f},
+    .rot = {0.0f, 0.0f, 45.0f},
   };
 
   while (1)
   {
+    f64 nowTime = PlatGetTime();
+    f64 delta = nowTime - baseTime;
+    baseTime = nowTime;
     PlatWindowPumpEvents(win);
     while (PlatWindowGetEvent(win, &ev))
     {
@@ -126,6 +148,9 @@ main()
           goto close;
       }
     }
+    trans.rot[0] = 45 * sin(nowTime);
+    trans.rot[1] = 30 + 90 * sin(nowTime / 2.0f);
+    trans.rot[2] = 45 + 30 * sin(nowTime * 2.0f);
     RendererDrawStaticMesh(ren, square, trans);
     err = RendererDraw(ren);
     if (err)
@@ -133,10 +158,14 @@ main()
       LOG_FATAL_CODE("failed to draw", err);
       return EXIT_FAILURE;
     }
+    f64 afterTime = PlatGetTime();
+    LOG_DEBUG_FMT("Drew frame in %f", afterTime - nowTime);
+
   }
 
 close:
 
+  RendererDestroyCamera(ren, cam);
   RendererDestroyStaticMesh(ren, square);
   PlatWindowDestroy(win);
   RendererDestroy(ren);

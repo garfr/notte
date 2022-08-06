@@ -20,6 +20,11 @@
 
 /* === TYPES === */
 
+struct
+{
+  f64 freq;
+} state;
+
 struct Plat_Window
 {
   HWND hwnd;
@@ -48,6 +53,10 @@ static Plat_Event *AllocEvent(Plat_Window *win, Plat_Event_Type t);
 Err_Code 
 PlatInit(void)
 {
+  LARGE_INTEGER large;
+  QueryPerformanceFrequency(&large);
+  state.freq = (f64) large.QuadPart;
+
   WNDCLASS wc = {
     .lpfnWndProc = WindowProc,
     .hInstance = GetModuleHandle(NULL),
@@ -199,6 +208,14 @@ PlatWindowGetFramebufferSize(Plat_Window *win,
   {
     *h = area.bottom;
   }
+}
+
+f64 
+PlatGetTime(void)
+{
+  LARGE_INTEGER large;
+  QueryPerformanceCounter(&large);
+  return large.QuadPart / state.freq;
 }
 
 /* === PRIVATE FUNCTIONS === */

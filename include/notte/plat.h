@@ -49,4 +49,6 @@ Err_Code PlatWindowCreateVulkanSurface(Plat_Window *win, VkInstance vk,
     VkAllocationCallbacks *alloc, VkSurfaceKHR *surfaceOut);
 void PlatWindowGetFramebufferSize(Plat_Window *win, u32 *w, u32 *h);
 
+f64 PlatGetTime(void);
+
 #endif /* NOTTE_PLAT_H */

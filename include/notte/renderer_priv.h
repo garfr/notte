@@ -74,6 +74,8 @@ typedef struct
   VkPipeline pipeline;
   VkPipelineLayout layout;
   VkRenderPass fakePass;
+  VkDescriptorSetLayout descriptorLayout;
+  VkDescriptorSet descriptorSets[MAX_FRAMES_IN_FLIGHT];
 } Technique;
 
 typedef struct
@@ -90,6 +92,13 @@ typedef struct
   VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];
   VkFramebuffer *swapFbs;
 } Render_Graph;
+
+struct Camera 
+{
+  Transform trans;
+  float fov;
+  Mat4 view, proj;
+};
 
 typedef enum
 {
@@ -109,6 +118,16 @@ typedef struct
   };
 } Draw_Call;
 
+typedef struct
+{
+  Mat4 view, proj;
+} Camera_Uniform;
+
+typedef struct
+{
+  Mat4 model;
+} Mesh_Push_Constant;
+
 struct Renderer
 {
   uint32_t currentFrame;
@@ -122,6 +141,7 @@ struct Renderer
   Queue_Family_Info queueInfo;
   Swapchain swapchain;
   Allocator alloc;
+  VkDescriptorPool descriptorPool;
 
   Fs_Driver *fs;
 
@@ -133,7 +153,12 @@ struct Renderer
 
   VkCommandPool utilPool;
 
+  VkBuffer uniformBuffers[MAX_FRAMES_IN_FLIGHT];
+  VkDeviceMemory uniformMemory[MAX_FRAMES_IN_FLIGHT];
+
   Vector drawCalls;
+
+  Camera *cam;
 };
 
 #endif /* NOTTE_RENDERER_PRIV_H */

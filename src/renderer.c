@@ -34,6 +34,11 @@ const char *requiredDeviceExtensions[] = {
 
 /* === PROTOTYPES === */
 
+static Transform TransformInit(void);
+static Err_Code CreateDescriptorPool(Renderer *ren);
+static void DestroyDescriptorPool(Renderer *ren);
+static Err_Code CreateBuffers(Renderer *ren);
+static void DestroyBuffers(Renderer *ren);
 static Err_Code CreateInstance(Renderer *ren);
 static Err_Code SelectPhysicalDevice(Renderer *ren);
 static bool DeviceIsSuitable(Renderer *ren, VkPhysicalDevice dev, 
@@ -46,6 +51,7 @@ static void CopyBuffer(Renderer *ren, VkBuffer srcBuffer, VkBuffer dstBuffer,
     VkDeviceSize size);
 static Err_Code CreateCommandPools(Renderer *ren);
 static void DestroyCommandPools(Renderer *ren);
+static void CameraSetMatrices(Renderer *ren, Camera *cam);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -106,6 +112,19 @@ RendererCreate(Renderer_Create_Info *createInfo,
     return err;
   }
   LOG_DEBUG("created command pools");
+  
+  err = CreateDescriptorPool(ren);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created descriptor pools");
+
+  err = CreateBuffers(ren);
+  if (err)
+  {
+    return err;
+  }
 
   err = ShaderManagerInit(ren, &ren->shaders);
   if (err)
@@ -134,6 +153,7 @@ RendererCreate(Renderer_Create_Info *createInfo,
     return err;
   }
   LOG_DEBUG("created render graph");
+
 
   *renOut = ren;
   return ERR_OK;
@@ -228,8 +248,10 @@ RendererDestroy(Renderer *ren)
   /* First finish all GPU work. */
   vkDeviceWaitIdle(ren->dev);
   VectorDestroy(&ren->drawCalls, ren->alloc);
+  DestroyBuffers(ren);
 
   DestroyCommandPools(ren);
+  DestroyDescriptorPool(ren);
   RenderGraphDeinit(ren, &ren->graph);
   ShaderManagerDeinit(ren, &ren->shaders);
   TechniqueManagerDeinit(ren, &ren->techs);
@@ -333,6 +355,7 @@ RendererDestroyStaticMesh(Renderer *ren,
   FREE_ARR(ren->alloc, (void *) mesh->indices, u16, mesh->nIndices, MEMORY_TAG_ARRAY);
   DestroyBuffer(ren, mesh->vertexBuffer, mesh->vertexMemory);
   DestroyBuffer(ren, mesh->indexBuffer, mesh->indexMemory);
+
   FREE(ren->alloc, mesh, Static_Mesh, MEMORY_TAG_RENDERER);
 }
 
@@ -352,7 +375,63 @@ RendererDrawStaticMesh(Renderer *ren,
 }
 
 
+Err_Code 
+RendererCreateCamera(Renderer *ren, 
+                     Camera **cameraOut)
+{
+  Camera *cam = NEW(ren->alloc, Camera, MEMORY_TAG_RENDERER);
+  cam->trans = TransformInit();
+  cam->fov = 45.0f;
+  CameraSetMatrices(ren, cam);
+
+  *cameraOut = cam;
+  return ERR_OK;
+}
+
+void 
+RendererDestroyCamera(Renderer *ren, 
+                      Camera *cam)
+{
+  FREE(ren->alloc, cam, Camera, MEMORY_TAG_RENDERER);
+}
+
+void 
+RendererSetCameraActive(Renderer *ren, 
+                        Camera *cam)
+{
+  ren->cam = cam;
+}
+
+void 
+RendererSetCameraTransform(Renderer *ren, 
+                           Camera *cam, 
+                           Transform trans)
+{
+  cam->trans = trans;
+  CameraSetMatrices(ren, cam);
+}
+
+void 
+RendererSetCameraFov(Renderer *ren, 
+                     Camera *cam, 
+                     f32 fov)
+{
+  cam->fov = fov;
+  CameraSetMatrices(ren, cam);
+}
+
 /* === PRIVATE FUNCTIONS === */
+
+static Transform 
+TransformInit(void)
+{
+  Transform trans = 
+  {
+    .pos = {0, 0, 0},
+    .rot = {0, 0, 0},
+  };
+  return trans;
+}
 
 static Err_Code 
 CreateInstance(Renderer *ren)
@@ -889,4 +968,83 @@ static void
 DestroyCommandPools(Renderer *ren)
 {
   vkDestroyCommandPool(ren->dev, ren->utilPool, ren->allocCbs);
+}
+
+static Err_Code 
+CreateBuffers(Renderer *ren)
+{
+  VkDeviceSize bufferSize = sizeof(Camera_Uniform);
+  VkResult err;
+
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+  {
+    err = CreateBuffer(ren, bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &ren->uniformBuffers[i], &ren->uniformMemory[i]);
+    if (err)
+    {
+      return err;
+    }
+  }
+
+  return ERR_OK;
+}
+
+static void
+DestroyBuffers(Renderer *ren)
+{
+  for (usize i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+  {
+    DestroyBuffer(ren, ren->uniformBuffers[i], ren->uniformMemory[i]);
+  }
+}
+
+static Err_Code 
+CreateDescriptorPool(Renderer *ren)
+{
+  VkResult vkErr;
+
+  VkDescriptorPoolSize poolSize = 
+  {
+    .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    .descriptorCount = MAX_FRAMES_IN_FLIGHT
+  };
+
+  VkDescriptorPoolCreateInfo createInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+    .poolSizeCount = 1,
+    .pPoolSizes = &poolSize,
+    .maxSets = MAX_FRAMES_IN_FLIGHT,
+  };
+
+  vkErr = vkCreateDescriptorPool(ren->dev, &createInfo, ren->allocCbs, 
+      &ren->descriptorPool);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+}
+
+static void 
+DestroyDescriptorPool(Renderer *ren)
+{
+  vkDestroyDescriptorPool(ren->dev, ren->descriptorPool, ren->allocCbs);
+}
+
+static void
+CameraSetMatrices(Renderer *ren, 
+                  Camera *cam)
+{
+  Vec3 center = {0.0f, 0.0f, 0.0f};
+  Vec3 up = {0.0f, 0.0f, 1.0f};
+
+  Mat4Lookat(cam->trans.pos, center, up, cam->view);
+
+  Mat4Perspective(cam->fov,
+      ren->swapchain.extent.width / (float) ren->swapchain.extent.height, 
+      0.1f, 10.0f, cam->proj);
+  cam->proj[1][1] *= 1.0f;
 }

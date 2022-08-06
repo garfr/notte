@@ -7,9 +7,16 @@
 #include <notte/render_graph.h>
 #include <notte/material.h>
 
+/* === CONSTANTS === */
+
+Vec3 X_AXIS = {1.0f, 0.0f, 0.0f};
+Vec3 Y_AXIS = {0.0f, 1.0f, 0.0f};
+Vec3 Z_AXIS = {0.0f, 0.0f, 1.0f};
+
 /* === PROTOTYPES === */
 
 static Err_Code CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph);
+static void TransformToMatrix(Transform trans, Mat4 out);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -171,6 +178,21 @@ RenderGraphRecord(Renderer *ren,
 
   vkCmdSetScissor(buf, 0, 1, &scissor);
 
+  if (ren->cam == NULL)
+  {
+    goto skipDraw;
+  }
+
+  Camera_Uniform camUniform;
+  Mat4Copy(ren->cam->view, camUniform.view);
+  Mat4Copy(ren->cam->proj, camUniform.proj);
+
+  void *data;
+  vkMapMemory(ren->dev, ren->uniformMemory[ren->currentFrame], 0, 
+      sizeof(Camera_Uniform), 0, &data);
+  MemoryCopy(data, &camUniform, sizeof(Camera_Uniform));
+  vkUnmapMemory(ren->dev, ren->uniformMemory[ren->currentFrame]);
+
   for (usize i = 0; i < ren->drawCalls.elemsUsed; i++)
   {
     Draw_Call *call = VectorIdx(&ren->drawCalls, i);
@@ -180,15 +202,25 @@ RenderGraphRecord(Renderer *ren,
       case DRAW_CALL_STATIC_MESH:
       {
         Static_Mesh *mesh = call->staticMesh;
+        Mesh_Push_Constant meshConstants;
+        TransformToMatrix(call->transform, meshConstants.model);
+
         VkBuffer vertexBuffers[] = {mesh->vertexBuffer};
         VkDeviceSize offsets[] = {0};
 
         vkCmdBindVertexBuffers(buf, 0, 1, vertexBuffers, offsets);
         vkCmdBindIndexBuffer(buf, mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindDescriptorSets(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+            tech->layout, 0, 1, &tech->descriptorSets[ren->currentFrame], 0, 
+            NULL);
+        vkCmdPushConstants(buf, tech->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 
+            sizeof(Mesh_Push_Constant), &meshConstants);
         vkCmdDrawIndexed(buf, mesh->nIndices, 1, 0, 0, 0);
       }
     }
   }
+
+skipDraw:
 
   VectorEmpty(&ren->drawCalls);
 
@@ -256,4 +288,15 @@ CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph)
   }
 
   return ERR_OK;
+}
+
+static void
+TransformToMatrix(Transform trans, Mat4 out)
+{
+  Mat4Identity(out);
+  Mat4Translate(out, trans.pos, out);
+  Mat4Rotate(out, DegToRad(trans.rot[0]), X_AXIS, out);
+  Mat4Rotate(out, DegToRad(trans.rot[1]), Y_AXIS, out);
+  Mat4Rotate(out, DegToRad(trans.rot[2]), Z_AXIS, out);
+  return;
 }
