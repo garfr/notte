@@ -7,16 +7,19 @@
 #include <notte/render_graph.h>
 #include <notte/material.h>
 
+/* === TYPES === */
+
 /* === CONSTANTS === */
 
-Vec3 X_AXIS = {1.0f, 0.0f, 0.0f};
-Vec3 Y_AXIS = {0.0f, 1.0f, 0.0f};
-Vec3 Z_AXIS = {0.0f, 0.0f, 1.0f};
+#define MARK_NONE 0
+#define MARK_TEMP 1
+#define MARK_PERM 2
 
 /* === PROTOTYPES === */
 
-static Err_Code CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph);
-static void TransformToMatrix(Transform trans, Mat4 out);
+static Err_Code CreateSwapchainFramebuffers(Render_Graph *graph);
+static Err_Code Rebake(Render_Graph *graph);
+static Err_Code TopoSortVisit(Render_Graph *graph, Render_Graph_Pass *pass);
 
 /* === PUBLIC FUNCTIONS === */
 
@@ -27,7 +30,12 @@ RenderGraphInit(Renderer *ren,
   Err_Code err;
   VkResult vkErr;
 
-  err = CreateSwapchainFramebuffers(ren, graph);
+  graph->swapFbs = NEW_ARR(ren->alloc, VkFramebuffer, ren->swapchain.nImages, 
+      MEMORY_TAG_RENDERER);
+
+  graph->ren = ren;
+
+  err = CreateSwapchainFramebuffers(graph);
   if (err)
   {
     return err;
@@ -86,13 +94,22 @@ RenderGraphInit(Renderer *ren,
     }
   }
 
+  /* 
+   * We don't need to initialize the fbs in graph->swap, because we will use 
+   * graph->swapFbs. 
+   */
+  graph->swap.isSwapchain = true;
+
+  graph->passes = VECTOR_CREATE(graph->ren->alloc, Render_Graph_Pass);
+  graph->bakedPasses = VECTOR_CREATE(graph->ren->alloc, Render_Graph_Pass *);
+
   return ERR_OK;
 }
 
 void 
-RenderGraphDeinit(Renderer *ren, 
-                  Render_Graph *graph)
+RenderGraphDeinit(Render_Graph *graph)
 {
+  Renderer *ren = graph->ren;
 
   vkDestroyCommandPool(ren->dev, graph->commandPool, ren->allocCbs);
 
@@ -110,139 +127,101 @@ RenderGraphDeinit(Renderer *ren,
     vkDestroyFramebuffer(ren->dev, ren->graph.swapFbs[i], ren->allocCbs);
   }
 
+  for (usize i = 0; i < graph->passes.elemsUsed; i++)
+  {
+    Render_Graph_Pass *pass = VectorIdx(&graph->passes, i);
+    VectorDestroy(&pass->reads, graph->ren->alloc);
+    VectorDestroy(&pass->writes, graph->ren->alloc);
+  }
+
+  VectorDestroy(&graph->passes, graph->ren->alloc);
+  VectorDestroy(&graph->bakedPasses, graph->ren->alloc);
+
   FREE_ARR(ren->alloc, ren->graph.swapFbs, VkFramebuffer, ren->swapchain.nImages, 
       MEMORY_TAG_RENDERER);
 }
 
+
+Err_Code 
+RenderGraphWriteTexture(Render_Graph *graph, 
+                        Render_Graph_Pass *pass,
+                        Render_Graph_Texture *tex)
+{
+  VectorPush(&pass->writes, graph->ren->alloc, &tex);
+
+  Rebake(graph);
+  return ERR_OK;
+}
+
 void 
-RenderGraphRecord(Renderer *ren, 
-                  Render_Graph *graph,
+RenderGraphRecord(Render_Graph *graph,
                   u32 imageIndex)
 {
+  Renderer *ren = graph->ren;
   Technique *tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
   VkCommandBuffer buf = graph->commandBuffers[ren->currentFrame];
 
   VkResult vkErr;
 
-  VkCommandBufferBeginInfo beginInfo =
+  for (usize i = 0; i < graph->bakedPasses.elemsUsed; i++)
   {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-  };
+    Render_Graph_Pass *pass = *((Render_Graph_Pass **) 
+        VectorIdx(&graph->bakedPasses, i));
 
-  vkErr = vkBeginCommandBuffer(buf, &beginInfo);
-  if (vkErr)
-  {
-    LOG_ERROR("failed to begin command buffer");
-    return;
-  }
-
-  VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
-
-  VkRenderPassBeginInfo renderPassInfo =
-  {
-    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-    .renderPass = tech->fakePass,
-    .framebuffer = graph->swapFbs[imageIndex],
-    .renderArea =
-      {
-        .offset = {0, 0},
-        .extent = ren->swapchain.extent,
-      },
-    .clearValueCount = 1,
-    .pClearValues = &clearColor,
-  };
-
-  vkCmdBeginRenderPass(buf, &renderPassInfo, 
-      VK_SUBPASS_CONTENTS_INLINE);
-
-  vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
-      tech->pipeline);
-
-  VkViewport viewport =
-  {
-    .x = 0.0f,
-    .y = 0.0f,
-    .width = (float) ren->swapchain.extent.width,
-    .height = (float) ren->swapchain.extent.height,
-    .minDepth = 0.0f,
-    .maxDepth = 1.0f,
-  };
-
-  vkCmdSetViewport(buf, 0, 1, &viewport);
-
-  VkRect2D scissor =
-  {
-    .offset = {0, 0},
-    .extent = ren->swapchain.extent,
-  };
-
-  vkCmdSetScissor(buf, 0, 1, &scissor);
-
-  if (ren->cam == NULL)
-  {
-    goto skipDraw;
-  }
-
-  Camera_Uniform camUniform;
-  Mat4Copy(ren->cam->view, camUniform.view);
-  Mat4Copy(ren->cam->proj, camUniform.proj);
-
-  void *data;
-  vkMapMemory(ren->dev, ren->uniformMemory[ren->currentFrame], 0, 
-      sizeof(Camera_Uniform), 0, &data);
-  MemoryCopy(data, &camUniform, sizeof(Camera_Uniform));
-  vkUnmapMemory(ren->dev, ren->uniformMemory[ren->currentFrame]);
-
-  for (usize i = 0; i < ren->drawCalls.elemsUsed; i++)
-  {
-    Draw_Call *call = VectorIdx(&ren->drawCalls, i);
-
-    switch (call->t)
+    VkCommandBufferBeginInfo beginInfo =
     {
-      case DRAW_CALL_STATIC_MESH:
-      {
-        Static_Mesh *mesh = call->staticMesh;
-        Mesh_Push_Constant meshConstants;
-        TransformToMatrix(call->transform, meshConstants.model);
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    };
 
-        VkBuffer vertexBuffers[] = {mesh->vertexBuffer};
-        VkDeviceSize offsets[] = {0};
-
-        vkCmdBindVertexBuffers(buf, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(buf, mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
-        vkCmdBindDescriptorSets(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
-            tech->layout, 0, 1, &tech->descriptorSets[ren->currentFrame], 0, 
-            NULL);
-        vkCmdPushConstants(buf, tech->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 
-            sizeof(Mesh_Push_Constant), &meshConstants);
-        vkCmdDrawIndexed(buf, mesh->nIndices, 1, 0, 0, 0);
-      }
+    vkErr = vkBeginCommandBuffer(buf, &beginInfo);
+    if (vkErr)
+    {
+      LOG_ERROR("failed to begin command buffer");
+      return;
     }
+
+    VkClearValue clearValues[2] = {
+      {{{0.0f, 0.0f, 0.0f, 1.0f}}},
+      {1.0f, 0},
+    };
+
+    VkRenderPassBeginInfo renderPassInfo =
+    {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+      .renderPass = tech->fakePass,
+      .framebuffer = graph->swapFbs[imageIndex],
+      .renderArea =
+        {
+          .offset = {0, 0},
+          .extent = ren->swapchain.extent,
+        },
+      .clearValueCount = 2,
+      .pClearValues = clearValues,
+    };
+
+    vkCmdBeginRenderPass(buf, &renderPassInfo, 
+        VK_SUBPASS_CONTENTS_INLINE);
+
+    pass->fn(graph->ren, buf);
+
+    vkCmdEndRenderPass(buf);
+
+    vkEndCommandBuffer(buf);
   }
-
-skipDraw:
-
-  VectorEmpty(&ren->drawCalls);
-
-  vkCmdEndRenderPass(buf);
-
-  vkEndCommandBuffer(buf);
 }
 
 Err_Code
-RenderGraphRebuild(Renderer *ren, Render_Graph *graph)
+RenderGraphRebuild(Render_Graph *graph)
 {
   Err_Code err;
+  Renderer *ren = graph->ren;
 
   for (usize i = 0; i < ren->swapchain.nImages; i++)
   {
     vkDestroyFramebuffer(ren->dev, graph->swapFbs[i], ren->allocCbs);
   }
-
-  FREE_ARR(ren->alloc, graph->swapFbs, VkFramebuffer, ren->swapchain.nImages, 
-      MEMORY_TAG_RENDERER);
-
-  err = CreateSwapchainFramebuffers(ren, graph);
+  err = CreateSwapchainFramebuffers(graph);
+  LOG_DEBUG("here");
   if (err)
   {
     return err;
@@ -250,15 +229,34 @@ RenderGraphRebuild(Renderer *ren, Render_Graph *graph)
   return ERR_OK;
 }
 
+Render_Graph_Texture *
+RenderGraphGetSwapchainTexture(Render_Graph *graph)
+{
+  return &graph->swap;
+}
+
+Err_Code 
+RenderGraphCreatePass(Render_Graph *graph, 
+                      Render_Graph_Pass **passOut)
+{
+  Render_Graph_Pass pass = 
+  {
+    .writes = VECTOR_CREATE(graph->ren->alloc, Render_Graph_Texture *),
+    .reads = VECTOR_CREATE(graph->ren->alloc, Render_Graph_Texture *),
+  };
+
+  *passOut = VectorPush(&graph->passes, graph->ren->alloc, &pass);
+  return ERR_OK;
+}
+
 /* === PRIVATE FUNCTIONS === */
 
 static Err_Code 
-CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph)
+CreateSwapchainFramebuffers(Render_Graph *graph)
 {
   VkResult vkErr;
   Technique *tech;
-  graph->swapFbs = NEW_ARR(ren->alloc, VkFramebuffer, ren->swapchain.nImages, 
-      MEMORY_TAG_RENDERER);
+  Renderer *ren = graph->ren;
 
   tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
   for (usize i = 0; i < ren->swapchain.nImages; i++)
@@ -266,13 +264,14 @@ CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph)
     VkImageView attachments[] =
     {
       ren->swapchain.imageViews[i],
+      ren->depthView,
     };
 
     VkFramebufferCreateInfo framebufferInfo = 
     {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
       .renderPass = tech->fakePass,
-      .attachmentCount = 1,
+      .attachmentCount = 2,
       .pAttachments = attachments,
       .width = ren->swapchain.extent.width,
       .height = ren->swapchain.extent.height,
@@ -290,13 +289,74 @@ CreateSwapchainFramebuffers(Renderer *ren, Render_Graph *graph)
   return ERR_OK;
 }
 
-static void
-TransformToMatrix(Transform trans, Mat4 out)
+static Err_Code 
+Rebake(Render_Graph *graph)
 {
-  Mat4Identity(out);
-  Mat4Translate(out, trans.pos, out);
-  Mat4Rotate(out, DegToRad(trans.rot[0]), X_AXIS, out);
-  Mat4Rotate(out, DegToRad(trans.rot[1]), Y_AXIS, out);
-  Mat4Rotate(out, DegToRad(trans.rot[2]), Z_AXIS, out);
-  return;
+  graph->bakedPasses.elemsUsed = 0;
+
+  for (usize i = 0; i < graph->passes.elemsUsed; i++)
+  {
+    Render_Graph_Pass *pass = VectorIdx(&graph->passes, i);
+    pass->mark = MARK_NONE;
+  }
+
+  for (usize i = 0; i < graph->passes.elemsUsed; i++)
+  {
+    Render_Graph_Pass *pass = VectorIdx(&graph->passes, i);
+    TopoSortVisit(graph, pass);
+  }
+
+  for (usize i = 0; i < graph->bakedPasses.elemsUsed; i++)
+  {
+    Render_Graph_Pass *pass = *((Render_Graph_Pass **) 
+        VectorIdx(&graph->bakedPasses, i));
+  }
+
+  return ERR_OK;
+}
+
+static Err_Code
+TopoSortVisit(Render_Graph *graph, Render_Graph_Pass *pass)
+{
+  Err_Code err;
+
+  if (pass->mark == MARK_PERM)
+  {
+    return ERR_OK;
+  }
+  if (pass->mark == MARK_TEMP)
+  {
+    return ERR_CYCLICAL_RENDER_GRAPH;
+  }
+
+  pass->mark = MARK_TEMP;
+
+  for (usize i = 0; i < pass->reads.elemsUsed; i++)
+  {
+    Render_Graph_Texture *read = *((Render_Graph_Texture **) 
+        VectorIdx(&pass->reads, i));
+
+    for (usize j = 0; j < graph->passes.elemsUsed; j++)
+    {
+      Render_Graph_Pass *tmpPass = VectorIdx(&graph->passes, j);
+      for (usize k = 0; k < tmpPass->writes.elemsUsed; k++)
+      {
+        Render_Graph_Texture *write = *((Render_Graph_Texture **) 
+            VectorIdx(&tmpPass->writes, k));
+        if (write == read)
+        {
+          err = TopoSortVisit(graph, tmpPass);
+          if (err)
+          {
+            return err;
+          }
+        }
+      }
+      
+    }
+  }
+
+  pass->mark = MARK_PERM;
+  VectorPush(&graph->bakedPasses, graph->ren->alloc, &pass);
+  return ERR_OK;
 }

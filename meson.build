@@ -19,6 +19,7 @@ src = [
   'src/render_graph.c',
   'src/vk_mem.c',
   'src/thread.c',
+  'src/image.c',
 ]
 
 cc = meson.get_compiler('c')

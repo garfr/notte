@@ -17,6 +17,8 @@ typedef struct Fs_Driver Fs_Driver;
 typedef void (*Fs_Driver_Destroy_Fn)(Fs_Driver *driver);
 typedef Err_Code (*Fs_File_Create_Fn)(Fs_Driver *driver, String path, 
     Membuf *buf);
+typedef Err_Code (*Fs_File_Write_Fn)(Fs_Driver *driver, String path, 
+    Membuf *buf);
 typedef void (*Fs_File_Destroy_Fn)(Fs_Driver *driver, Membuf *buf);
 
 struct Fs_Driver
@@ -26,12 +28,14 @@ struct Fs_Driver
 
   Fs_Driver_Destroy_Fn destroyFn;
   Fs_File_Create_Fn fileCreateFn;
+  Fs_File_Write_Fn fileWriteFn;
   Fs_File_Destroy_Fn fileDestroyFn;
 };
 
 Err_Code FsDiskDriverCreate(Fs_Driver *driverOut, Allocator alloc,
     String rootPath);
 Err_Code FsFileLoad(Fs_Driver *driver, String path, Membuf *buf);
+Err_Code FsFileWrite(Fs_Driver *driver, String path, Membuf *out);
 void FsFileDestroy(Fs_Driver *driver, Membuf *buf);
 
 void FsDriverDestroy(Fs_Driver *driver);

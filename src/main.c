@@ -18,16 +18,16 @@
 
 /* === GLOBALS === */
 
-const Vertex verts[] =
-{
-  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-  {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}},
+Static_Vert verts[] = {
+  {{-0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+  {{0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+  {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+  {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
 };
 
-const u16 indices[] = {
-  0, 1, 2, 2, 3, 0,
+u32 indices[] = 
+{
+  0, 1, 2, 2, 3, 0
 };
 
 /* === PUBLIC FUNCTIONS === */
@@ -43,7 +43,7 @@ main()
   Membuf bsonBuf;
   Parse_Result result;
   Fs_Driver fs;
-  Static_Mesh *square;
+  Static_Mesh *bunny;
 
   LogSetLevel(LOG_LEVEL_DEBUG);
 
@@ -95,20 +95,26 @@ main()
     return EXIT_FAILURE;
   }
 
-  Static_Mesh_Create_Info squareCreateInfo = 
-  {
-    .verts = verts, 
-    .indices = indices,
-    .nVerts = ELEMOF(verts),
-    .nIndices = ELEMOF(indices),
-  };
-
-  err = RendererCreateStaticMesh(ren, &squareCreateInfo, &square);
+  f64 startTime = PlatGetTime();
+  Membuf modelBuf;
+  err = FsFileLoad(&fs, STRING_CSTR("assets/bunny.ustatic"), &modelBuf);
   if (err)
   {
-    LOG_FATAL_CODE("failed to create square mesh", err);
+    LOG_FATAL_CODE("failed to load model buffer", err);
     return EXIT_FAILURE;
   }
+
+  Parse_Result meshResult;
+  err = StaticMeshLoadUStatic(ren, libcAlloc, &bunny, &meshResult, modelBuf);
+  if (err)
+  {
+    LOG_FATAL_CODE("failed to load bunny model", err);
+    return EXIT_FAILURE;
+  }
+  f64 endTime = PlatGetTime();
+  LOG_DEBUG_FMT("Loaded model in %f", endTime - startTime);
+
+  FsFileDestroy(&fs, &modelBuf);
 
   Camera *cam;
   err = RendererCreateCamera(ren, &cam);
@@ -117,11 +123,12 @@ main()
     LOG_FATAL_CODE("failed to create camera", err);
     return EXIT_FAILURE;
   }
+
   LOG_DEBUG("created camera");
 
   Transform camTrans = 
   {
-    .pos = {2.0, 2.0, 2.0},
+    .pos = {2.0, 0.0, 2.0},
   };
   RendererSetCameraTransform(ren, cam, camTrans);
   RendererSetCameraActive(ren, cam);
@@ -131,8 +138,10 @@ main()
   Transform trans = 
   {
     .pos = {0.0f, 0.0f, 0.0f},
-    .rot = {0.0f, 0.0f, 45.0f},
+    .rot = {0.0f, 0.0f, 0.0f},
   };
+
+  Material *mat = RendererLookupMaterial(ren, STRING_CSTR("tri"));
 
   while (1)
   {
@@ -151,7 +160,7 @@ main()
     trans.rot[0] = 45 * sin(nowTime);
     trans.rot[1] = 30 + 90 * sin(nowTime / 2.0f);
     trans.rot[2] = 45 + 30 * sin(nowTime * 2.0f);
-    RendererDrawStaticMesh(ren, square, trans);
+    RendererDrawStaticMesh(ren, bunny, trans, mat);
     err = RendererDraw(ren);
     if (err)
     {
@@ -166,7 +175,7 @@ main()
 close:
 
   RendererDestroyCamera(ren, cam);
-  RendererDestroyStaticMesh(ren, square);
+  RendererDestroyStaticMesh(ren, bunny);
   PlatWindowDestroy(win);
   RendererDestroy(ren);
   FsDriverDestroy(&fs);

@@ -19,6 +19,7 @@ typedef enum
   ERR_INVALID_SHADER, /* When a shader fails to compile. */
   ERR_UNIMPLEMENTED_FUNCTIONALITY, /* When a feature is required but not 
                                       implemented. */
+  ERR_CYCLICAL_RENDER_GRAPH,
   ERR_NO_SUITABLE_HARDWARE,
 } Err_Code;
 

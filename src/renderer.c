@@ -4,12 +4,15 @@
  * Vulkan renderer.
  */
 
+#include <stb_image.h>
+
 #include <notte/renderer.h>
 #include <notte/membuf.h>
 #include <notte/bson.h>
 #include <notte/dict.h>
 #include <notte/renderer_priv.h>
 #include <notte/material.h>
+#include <notte/render_graph.h>
 
 /* === MACROS === */
 
@@ -32,8 +35,26 @@ const char *requiredDeviceExtensions[] = {
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
+Vec3 X_AXIS = {1.0f, 0.0f, 0.0f};
+Vec3 Y_AXIS = {0.0f, 1.0f, 0.0f};
+Vec3 Z_AXIS = {0.0f, 0.0f, 1.0f};
+
 /* === PROTOTYPES === */
 
+static void TransformToMatrix(Transform trans, Mat4 out);
+static void DrawTri(Renderer *ren, VkCommandBuffer buf);
+static Err_Code StructureRenderGraph(Renderer *ren);
+static Err_Code CreateDepth(Renderer *ren);
+static Err_Code CreateImageView(Renderer *ren, VkImage image, VkFormat format, 
+    VkImageAspectFlags aspectFlags, VkImageView *view);
+static void CopyBufferToImage(Renderer *ren, VkBuffer buffer, VkImage image, 
+    u32 w, u32 h);
+static void TransitionImageLayout(Renderer *ren, VkImage image, VkFormat format,
+    VkImageLayout oldLayout, VkImageLayout newLayout);
+static VkCommandBuffer BeginUtilCommands(Renderer *ren);
+static void EndUtilCommands(Renderer *ren, VkCommandBuffer cmds);
+static Err_Code CreateTextures(Renderer *ren);
+static void DestroyTextures(Renderer *ren);
 static Transform TransformInit(void);
 static Err_Code CreateDescriptorPool(Renderer *ren);
 static void DestroyDescriptorPool(Renderer *ren);
@@ -106,6 +127,12 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created swapchain");
 
+  err = CreateDepth(ren);
+  if (err)  
+  {
+    return err;
+  }
+
   err = CreateCommandPools(ren);
   if (err)
   {
@@ -126,6 +153,12 @@ RendererCreate(Renderer_Create_Info *createInfo,
     return err;
   }
 
+  err = CreateTextures(ren);
+  if (err)
+  {
+    return err;
+  }
+
   err = ShaderManagerInit(ren, &ren->shaders);
   if (err)
   {
@@ -140,12 +173,40 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created technique manager");
 
-  err = TechniqueManagerOpen(ren, &ren->techs, STRING_CSTR("tri.bson"));
+  err = EffectManagerInit(ren, &ren->effects);
   if (err)
   {
     return err;
   }
-  LOG_DEBUG("loaded 'tri.bson' file");
+  LOG_DEBUG("created effect manager");
+
+  err = MaterialManagerInit(ren, &ren->materials);
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("created material manager");
+
+  err = TechniqueManagerOpen(ren, &ren->techs, STRING_CSTR("techs.bson"));
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("loaded 'techs.bson'");
+
+  err = EffectManagerOpen(ren, &ren->effects, STRING_CSTR("effects.bson"));
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("loaded 'effects.bson'");
+
+  err = MaterialManagerOpen(ren, &ren->materials, STRING_CSTR("material.bson"));
+  if (err)
+  {
+    return err;
+  }
+  LOG_DEBUG("loaded 'materials.bson'");
 
   err = RenderGraphInit(ren, &ren->graph);
   if (err)
@@ -154,6 +215,11 @@ RendererCreate(Renderer_Create_Info *createInfo,
   }
   LOG_DEBUG("created render graph");
 
+  err = StructureRenderGraph(ren);
+  if (err)
+  {
+    return err;
+  }
 
   *renOut = ren;
   return ERR_OK;
@@ -190,7 +256,7 @@ RendererDraw(Renderer *ren)
 
   vkResetCommandBuffer(ren->graph.commandBuffers[ren->currentFrame], 0);
 
-  RenderGraphRecord(ren, &ren->graph, imageIndex);
+  RenderGraphRecord(&ren->graph, imageIndex);
 
   VkSemaphore waitSemaphores[] = 
     {ren->graph.imageAvailableSemaphores[ren->currentFrame]};
@@ -250,11 +316,14 @@ RendererDestroy(Renderer *ren)
   VectorDestroy(&ren->drawCalls, ren->alloc);
   DestroyBuffers(ren);
 
+  DestroyTextures(ren);
   DestroyCommandPools(ren);
   DestroyDescriptorPool(ren);
-  RenderGraphDeinit(ren, &ren->graph);
-  ShaderManagerDeinit(ren, &ren->shaders);
+  RenderGraphDeinit(&ren->graph);
+  MaterialManagerDeinit(ren, &ren->materials);
+  EffectManagerDeinit(ren, &ren->effects);
   TechniqueManagerDeinit(ren, &ren->techs);
+  ShaderManagerDeinit(ren, &ren->shaders);
   DestroySwapchain(ren, &ren->swapchain);
   vkDestroySurfaceKHR(ren->vk, ren->surface, ren->allocCbs);
   vkDestroyDevice(ren->dev, ren->allocCbs);
@@ -278,15 +347,15 @@ RendererCreateStaticMesh(Renderer *ren,
 
   mesh->nVerts = createInfo->nVerts;
   mesh->nIndices = createInfo->nIndices;
-  Vertex *verts = NEW_ARR(ren->alloc, Vertex, mesh->nVerts, MEMORY_TAG_ARRAY);
-  MemoryCopy(verts, createInfo->verts, sizeof(Vertex) * mesh->nVerts);
-  u16 *indices = NEW_ARR(ren->alloc, u16, mesh->nIndices, MEMORY_TAG_ARRAY);
-  MemoryCopy(indices, createInfo->indices, sizeof(u16) * mesh->nIndices);
+  Static_Vert *verts = NEW_ARR(ren->alloc, Static_Vert, mesh->nVerts, MEMORY_TAG_ARRAY);
+  MemoryCopy(verts, createInfo->verts, sizeof(Static_Vert) * mesh->nVerts);
+  u32 *indices = NEW_ARR(ren->alloc, u32, mesh->nIndices, MEMORY_TAG_ARRAY);
+  MemoryCopy(indices, createInfo->indices, sizeof(u32) * mesh->nIndices);
+
   mesh->verts = verts;
   mesh->indices = indices;
 
-
-  vBufferSize = sizeof(Vertex) * mesh->nVerts;
+  vBufferSize = sizeof(Static_Vert) * mesh->nVerts;
   err = CreateBuffer(ren, vBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       &vStagingBuffer, &vStagingBufferMemory);
@@ -313,7 +382,7 @@ RendererCreateStaticMesh(Renderer *ren,
 
   DestroyBuffer(ren, vStagingBuffer, vStagingBufferMemory);
 
-  iBufferSize = sizeof(u16) * mesh->nIndices;
+  iBufferSize = sizeof(u32) * mesh->nIndices;
   err = CreateBuffer(ren, iBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       &iStagingBuffer, &iStagingBufferMemory);
@@ -351,8 +420,8 @@ RendererDestroyStaticMesh(Renderer *ren,
                           Static_Mesh *mesh)
 {
   vkDeviceWaitIdle(ren->dev);
-  FREE_ARR(ren->alloc, (void *) mesh->verts, Vertex, mesh->nVerts, MEMORY_TAG_ARRAY);
-  FREE_ARR(ren->alloc, (void *) mesh->indices, u16, mesh->nIndices, MEMORY_TAG_ARRAY);
+  FREE_ARR(ren->alloc, (void *) mesh->verts, Static_Vert, mesh->nVerts, MEMORY_TAG_ARRAY);
+  FREE_ARR(ren->alloc, (void *) mesh->indices, u32, mesh->nIndices, MEMORY_TAG_ARRAY);
   DestroyBuffer(ren, mesh->vertexBuffer, mesh->vertexMemory);
   DestroyBuffer(ren, mesh->indexBuffer, mesh->indexMemory);
 
@@ -362,13 +431,15 @@ RendererDestroyStaticMesh(Renderer *ren,
 void 
 RendererDrawStaticMesh(Renderer *ren, 
                        Static_Mesh *mesh, 
-                       Transform transform)
+                       Transform transform,
+                       Material *mat)
 {
   Draw_Call drawCall = 
   {
     .t = DRAW_CALL_STATIC_MESH,
     .staticMesh = mesh,
     .transform = transform,
+    .material = mat,
   };
 
   VectorPush(&ren->drawCalls, ren->alloc, &drawCall);
@@ -420,7 +491,137 @@ RendererSetCameraFov(Renderer *ren,
   CameraSetMatrices(ren, cam);
 }
 
+Material *
+RendererLookupMaterial(Renderer *ren, 
+                       String name)
+{
+  return MaterialManagerLookup(&ren->materials, name);
+}
+
 /* === PRIVATE FUNCTIONS === */
+
+static void 
+DrawTri(Renderer *ren, 
+        VkCommandBuffer buf)
+{
+  Technique *tech = TechniqueManagerLookup(&ren->techs, STRING_CSTR("tri"));
+
+  vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+      tech->pipeline);
+
+  VkViewport viewport =
+  {
+    .x = 0.0f,
+    .y = 0.0f,
+    .width = (float) ren->swapchain.extent.width,
+    .height = (float) ren->swapchain.extent.height,
+    .minDepth = 0.0f,
+    .maxDepth = 1.0f,
+  };
+
+  vkCmdSetViewport(buf, 0, 1, &viewport);
+
+  VkRect2D scissor =
+  {
+    .offset = {0, 0},
+    .extent = ren->swapchain.extent,
+  };
+
+  vkCmdSetScissor(buf, 0, 1, &scissor);
+
+  if (ren->cam == NULL)
+  {
+    goto skipDraw;
+  }
+
+  Camera_Uniform camUniform;
+  Mat4Copy(ren->cam->view, camUniform.view);
+  Mat4Copy(ren->cam->proj, camUniform.proj);
+
+  void *data;
+  vkMapMemory(ren->dev, ren->uniformMemory[ren->currentFrame], 0, 
+      sizeof(Camera_Uniform), 0, &data);
+  MemoryCopy(data, &camUniform, sizeof(Camera_Uniform));
+  vkUnmapMemory(ren->dev, ren->uniformMemory[ren->currentFrame]);
+
+  for (usize i = 0; i < ren->drawCalls.elemsUsed; i++)
+  {
+    Draw_Call *call = VectorIdx(&ren->drawCalls, i);
+
+    switch (call->t)
+    {
+      case DRAW_CALL_STATIC_MESH:
+      {
+        Static_Mesh *mesh = call->staticMesh;
+        Mesh_Push_Constant meshConstants;
+        TransformToMatrix(call->transform, meshConstants.model);
+
+        VkBuffer vertexBuffers[] = {mesh->vertexBuffer};
+        VkDeviceSize offsets[] = {0};
+
+        vkCmdBindVertexBuffers(buf, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(buf, mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindDescriptorSets(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+            tech->layout, 0, 1, &tech->descriptorSets[ren->currentFrame], 0, 
+            NULL);
+        vkCmdPushConstants(buf, tech->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 
+            sizeof(Mesh_Push_Constant), &meshConstants);
+        vkCmdDrawIndexed(buf, mesh->nIndices, 1, 0, 0, 0);
+      }
+    }
+  }
+
+skipDraw:
+
+  VectorEmpty(&ren->drawCalls);
+}
+
+static Err_Code 
+StructureRenderGraph(Renderer *ren)
+{
+  Err_Code err;
+  Render_Graph_Pass *tri;
+  Render_Graph_Texture *swap = RenderGraphGetSwapchainTexture(&ren->graph);
+  err = RenderGraphCreatePass(&ren->graph, &tri);
+  if (err)
+  {
+    return err;
+  }
+
+  tri->fn = DrawTri;
+
+  err = RenderGraphWriteTexture(&ren->graph, tri, swap);
+  if (err)
+  {
+    return err;
+  }
+
+  return ERR_OK;
+}
+
+static Err_Code 
+CreateDepth(Renderer *ren)
+{
+  Err_Code err;
+
+  err = CreateImage(ren, ren->swapchain.extent.width, ren->swapchain.extent.height, 
+      VK_FORMAT_D32_SFLOAT, VK_IMAGE_TILING_OPTIMAL, 
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ren->depthImage, &ren->depthMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  err = CreateImageView(ren, ren->depthImage, VK_FORMAT_D32_SFLOAT, 
+      VK_IMAGE_ASPECT_DEPTH_BIT, &ren->depthView);
+  if (err)
+  {
+    return err;
+  }
+
+  return ERR_OK;
+}
 
 static Transform 
 TransformInit(void)
@@ -513,6 +714,7 @@ DeviceIsSuitable(Renderer *ren,
   u32 nExtensions;
   VkExtensionProperties *extensions;
   u32 nFormats, nPresentModes;
+  VkPhysicalDeviceFeatures supportedFeatures;
 
   vkEnumerateDeviceExtensionProperties(dev, NULL, &nExtensions, NULL);
   extensions = NEW_ARR(ren->alloc, VkExtensionProperties, nExtensions, 
@@ -572,11 +774,13 @@ found:
     }
   }
 
+  vkGetPhysicalDeviceFeatures(dev, &supportedFeatures);
+
   FREE_ARR(ren->alloc, queueFamilies, VkQueueFamilyProperties, nQueueFamilies, 
       MEMORY_TAG_ARRAY);
   FREE_ARR(ren->alloc, extensions, VkExtensionProperties, nExtensions, 
       MEMORY_TAG_ARRAY);
-  return hasGraphics & hasPresent;
+  return hasGraphics & hasPresent && supportedFeatures.samplerAnisotropy;
 }
 
 static Err_Code 
@@ -633,6 +837,7 @@ CreateLogicalDevice(Renderer *ren)
   };
 
   VkPhysicalDeviceFeatures deviceFeatures = {0};
+  deviceFeatures.samplerAnisotropy = VK_TRUE;
 
   queueCreateInfoCount = 
     ren->queueInfo.graphicsFamily == ren->queueInfo.presentFamily ? 1 : 2;
@@ -668,6 +873,7 @@ CreateSwapchain(Renderer *ren,
                 Swapchain *swapchain)
 {
   VkResult vkErr;
+  Err_Code err;
   VkSurfaceCapabilitiesKHR capabilities;
   u32 nFormats, nPresentModes;
   VkSurfaceFormatKHR *formats;
@@ -797,35 +1003,14 @@ foundMailbox:
 
   for (u32 i = 0; i < swapchain->nImages; i++)
   {
-    VkImageViewCreateInfo createInfo =
+    err = CreateImageView(ren, swapchain->images[i], swapchain->format.format, 
+        VK_IMAGE_ASPECT_COLOR_BIT, &swapchain->imageViews[i]);
+    if (err)
     {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = swapchain->images[i],
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = swapchain->format.format,
-      .components = {
-        .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .a = VK_COMPONENT_SWIZZLE_IDENTITY,
-      },
-      .subresourceRange = 
-      {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-      },
-    };
-
-    vkErr = vkCreateImageView(ren->dev, &createInfo, ren->allocCbs, 
-        &swapchain->imageViews[i]);
-    if (vkErr)
-    {
-      return ERR_LIBRARY_FAILURE;
+      return err;
     }
   }
+
   FREE_ARR(ren->alloc, presentModes, VkPresentModeKHR, nPresentModes, 
       MEMORY_TAG_ARRAY);
   FREE_ARR(ren->alloc, formats, VkSurfaceFormatKHR, nFormats, 
@@ -841,6 +1026,9 @@ DestroySwapchain(Renderer *ren, Swapchain *swapchain)
   {
     vkDestroyImageView(ren->dev, swapchain->imageViews[i], ren->allocCbs);
   }
+
+  DestroyImage(ren, ren->depthImage, ren->depthMemory);
+  vkDestroyImageView(ren->dev, ren->depthView, ren->allocCbs);
 
   FREE_ARR(ren->alloc, swapchain->imageViews, VkImageView, swapchain->nImages, 
       MEMORY_TAG_ARRAY);
@@ -860,7 +1048,7 @@ RebuildResize(Renderer *ren)
     return err;
   }
 
-  err = RenderGraphRebuild(ren);
+  err = RenderGraphRebuild(&ren->graph);
   if (err)
   {
     return err;
@@ -887,6 +1075,11 @@ RebuildSwapchain(Renderer *ren)
 
   ren->swapchain = new;
 
+  err = CreateDepth(ren);
+  if (err)
+  {
+    return err;
+  }
   
   return ERR_OK;
 }
@@ -897,25 +1090,7 @@ CopyBuffer(Renderer *ren,
            VkBuffer dstBuffer, 
            VkDeviceSize size)
 {
-  VkCommandBuffer commandBuffer;
-
-  VkCommandBufferAllocateInfo allocInfo =
-  {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-    .commandPool = ren->utilPool,
-    .commandBufferCount = 1,
-  };
-
-  vkAllocateCommandBuffers(ren->dev, &allocInfo, &commandBuffer);
-
-  VkCommandBufferBeginInfo beginInfo =
-  {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-
-  vkBeginCommandBuffer(commandBuffer, &beginInfo);
+  VkCommandBuffer cmd = BeginUtilCommands(ren);
 
   VkBufferCopy copyRegion = 
   {
@@ -924,21 +1099,9 @@ CopyBuffer(Renderer *ren,
     .size = size,
   };
 
-  vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+  vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
 
-  vkEndCommandBuffer(commandBuffer);
-
-  VkSubmitInfo submitInfo = 
-  {
-    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-    .commandBufferCount = 1,
-    .pCommandBuffers = &commandBuffer,
-  };
-
-  vkQueueSubmit(ren->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-  vkQueueWaitIdle(ren->graphicsQueue);
-
-  vkFreeCommandBuffers(ren->dev, ren->utilPool, 1, &commandBuffer);
+  EndUtilCommands(ren, cmd);
 }
 
 static Err_Code 
@@ -1004,17 +1167,23 @@ CreateDescriptorPool(Renderer *ren)
 {
   VkResult vkErr;
 
-  VkDescriptorPoolSize poolSize = 
+  VkDescriptorPoolSize poolSizes[2] = 
   {
-    .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-    .descriptorCount = MAX_FRAMES_IN_FLIGHT
+    {
+      .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorCount = MAX_FRAMES_IN_FLIGHT
+    },
+    {
+      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = MAX_FRAMES_IN_FLIGHT,
+    }
   };
 
   VkDescriptorPoolCreateInfo createInfo = 
   {
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-    .poolSizeCount = 1,
-    .pPoolSizes = &poolSize,
+    .poolSizeCount = 2,
+    .pPoolSizes = poolSizes,
     .maxSets = MAX_FRAMES_IN_FLIGHT,
   };
 
@@ -1048,3 +1217,284 @@ CameraSetMatrices(Renderer *ren,
       0.1f, 10.0f, cam->proj);
   cam->proj[1][1] *= 1.0f;
 }
+
+static Err_Code 
+CreateTextures(Renderer *ren)
+{
+  VkBuffer stagingBuffer;
+  VkDeviceMemory stagingMemory;
+  int width, height, channels;
+  VkDeviceSize imageSize;
+  void *data;
+  VkResult vkErr;
+  Err_Code err;
+  VkPhysicalDeviceProperties properties;
+
+  stbi_uc *pixels = stbi_load("../assets/texture.jpg", &width, &height, 
+      &channels, STBI_rgb_alpha);
+
+  imageSize = width * height * 4;
+
+  if (pixels == NULL)
+  {
+    return ERR_NO_FILE;
+  }
+
+  err = CreateBuffer(ren, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
+      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  vkMapMemory(ren->dev, stagingMemory, 0, imageSize, 0, &data);
+  MemoryCopy(data, pixels, imageSize);
+  vkUnmapMemory(ren->dev, stagingMemory);
+
+  stbi_image_free(pixels);
+
+  err = CreateImage(ren, width, height, VK_FORMAT_R8G8B8A8_SRGB,
+      VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+      &ren->texture, &ren->textureMemory);
+  if (err)
+  {
+    return err;
+  }
+
+  TransitionImageLayout(ren, ren->texture, VK_FORMAT_R8G8B8A8_SRGB, 
+      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+  CopyBufferToImage(ren, stagingBuffer, ren->texture, width, height);
+
+  TransitionImageLayout(ren, ren->texture, VK_FORMAT_R8G8B8A8_SRGB, 
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+  DestroyBuffer(ren, stagingBuffer, stagingMemory);
+
+  err = CreateImageView(ren, ren->texture, VK_FORMAT_R8G8B8A8_SRGB, 
+      VK_IMAGE_ASPECT_COLOR_BIT, &ren->textureView);
+  if (err)
+  {
+    return err;
+  }
+
+  vkGetPhysicalDeviceProperties(ren->pDev, &properties);
+
+  VkSamplerCreateInfo sampleInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+    .magFilter = VK_FILTER_LINEAR,
+    .minFilter = VK_FILTER_LINEAR,
+    .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    .anisotropyEnable = VK_TRUE,
+    .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+    .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+    .unnormalizedCoordinates = VK_FALSE,
+    .compareEnable = VK_FALSE,
+    .compareOp = VK_COMPARE_OP_ALWAYS,
+    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+    .mipLodBias = 0.0f,
+    .minLod = 0.0f,
+    .maxLod = 0.0f,
+  };
+
+  vkErr = vkCreateSampler(ren->dev, &sampleInfo, ren->allocCbs, 
+      &ren->textureSampler);
+  if (err)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+
+}
+
+static Err_Code 
+CreateImageView(Renderer *ren, 
+                VkImage image, 
+                VkFormat format, 
+                VkImageAspectFlags aspectFlags,
+                VkImageView *view)
+{
+  VkResult vkErr;
+
+  VkImageViewCreateInfo viewInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+    .image = image,
+    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+    .format = format,
+    .subresourceRange = 
+    {
+      .aspectMask = aspectFlags,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+    },
+  };
+
+  vkErr = vkCreateImageView(ren->dev, &viewInfo, ren->allocCbs, 
+      view);
+  if (vkErr)
+  {
+    return ERR_LIBRARY_FAILURE;
+  }
+
+  return ERR_OK;
+}
+
+static void 
+DestroyTextures(Renderer *ren)
+{
+  DestroyImage(ren, ren->texture, ren->textureMemory);
+  vkDestroyImageView(ren->dev, ren->textureView, ren->allocCbs);
+  vkDestroySampler(ren->dev, ren->textureSampler, ren->allocCbs);
+}
+
+static VkCommandBuffer 
+BeginUtilCommands(Renderer *ren)
+{
+  VkCommandBuffer cmd;
+
+  VkCommandBufferAllocateInfo allocInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandPool = ren->utilPool,
+    .commandBufferCount = 1,
+  };
+
+  vkAllocateCommandBuffers(ren->dev, &allocInfo, &cmd);
+
+  VkCommandBufferBeginInfo beginInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+
+  vkBeginCommandBuffer(cmd, &beginInfo);
+
+  return cmd;
+}
+
+static void 
+EndUtilCommands(Renderer *ren, 
+                VkCommandBuffer cmd)
+{
+  vkEndCommandBuffer(cmd);
+
+  VkSubmitInfo submitInfo = 
+  {
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .commandBufferCount = 1,
+    .pCommandBuffers = &cmd,
+  };
+
+  vkQueueSubmit(ren->graphicsQueue, 1, &submitInfo , VK_NULL_HANDLE);
+  vkQueueWaitIdle(ren->graphicsQueue);
+
+  vkFreeCommandBuffers(ren->dev, ren->utilPool, 1, &cmd);
+}
+
+static void 
+TransitionImageLayout(Renderer *ren, 
+                      VkImage image, 
+                      VkFormat format, 
+                      VkImageLayout oldLayout, 
+                      VkImageLayout newLayout)
+{
+  VkPipelineStageFlags sourceStage, destStage;
+  VkCommandBuffer cmd = BeginUtilCommands(ren);
+
+  VkImageMemoryBarrier barrier = 
+  {
+    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+    .oldLayout = oldLayout,
+    .newLayout = newLayout,
+    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+    .image = image,
+    .subresourceRange = 
+    {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+    },
+  };
+
+  if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && 
+      newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+  {
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    destStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+  } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+      newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+  {
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    destStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  } else
+  {
+    LOG_ERROR("Unsupport layout transition!");
+  }
+
+  vkCmdPipelineBarrier(cmd, sourceStage, destStage, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+  EndUtilCommands(ren, cmd);
+}
+
+static void 
+CopyBufferToImage(Renderer *ren, 
+                  VkBuffer buffer, 
+                  VkImage image, 
+                  u32 w, 
+                  u32 h)
+{
+  VkCommandBuffer cmd = BeginUtilCommands(ren);
+
+  VkBufferImageCopy region = 
+  {
+    .bufferOffset = 0,
+    .bufferRowLength = 0,
+    .bufferImageHeight = 0,
+    .imageSubresource =
+    {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .mipLevel = 0,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+    },
+    .imageOffset = {0, 0, 0},
+    .imageExtent = {w, h, 1},
+  };
+
+  vkCmdCopyBufferToImage(cmd, buffer, image, 
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+  EndUtilCommands(ren, cmd);
+}
+
+static void
+TransformToMatrix(Transform trans, Mat4 out)
+{
+  Mat4Identity(out);
+  Mat4Translate(out, trans.pos, out);
+  Mat4Rotate(out, DegToRad(trans.rot[0]), X_AXIS, out);
+  Mat4Rotate(out, DegToRad(trans.rot[1]), Y_AXIS, out);
+  Mat4Rotate(out, DegToRad(trans.rot[2]), Z_AXIS, out);
+  return;
+}
+

@@ -54,6 +54,8 @@ struct Fs_Dir_Monitor
 static void FsDiskDriverDestroy(Fs_Driver *driver);
 static Err_Code FsDiskFileCreate(Fs_Driver *driver, String path, 
     Membuf *buf);
+static Err_Code FsDiskFileWrite(Fs_Driver *driver, String path, 
+    Membuf *buf);
 static void FsDiskFileDestroy(Fs_Driver *driver, Membuf *buf);
 static void FsDirMonitorThread(void *ud);
 static void ProcessRawEvents(Fs_Dir_Monitor *mon);
@@ -76,6 +78,7 @@ FsDiskDriverCreate(Fs_Driver *driverOut,
   driverOut->destroyFn = FsDiskDriverDestroy;
   driverOut->fileCreateFn = FsDiskFileCreate;;
   driverOut->fileDestroyFn = FsDiskFileDestroy;
+  driverOut->fileWriteFn = FsDiskFileWrite;
 
   return ERR_OK;
 }
@@ -92,6 +95,14 @@ FsFileLoad(Fs_Driver *driver,
              Membuf *buf)
 {
   return driver->fileCreateFn(driver, path, buf);
+}
+
+Err_Code
+FsFileWrite(Fs_Driver *driver, 
+            String path, 
+            Membuf *buf)
+{
+  return driver->fileWriteFn(driver, path, buf);
 }
 
 void 
@@ -178,6 +189,25 @@ static void
 FsDiskDriverDestroy(Fs_Driver *driver)
 {
   FREE(driver->alloc, driver->ud, Fs_Disk_Driver, MEMORY_TAG_FS);
+}
+
+static Err_Code 
+FsDiskFileWrite(Fs_Driver *driver, 
+                String path, 
+                Membuf *buf)
+{
+  usize pathSize;
+
+  Fs_Disk_Driver *disk = driver->ud;
+  const char *cPath = StringConcatIntoCString(driver->alloc, disk->root, 
+      path, &pathSize);
+
+  FILE *file = fopen(cPath, "wb");
+
+  fwrite(buf->data, 1, buf->size, file);
+
+  fclose(file);
+  return ERR_OK;
 }
 
 static Err_Code 
@@ -271,6 +301,10 @@ FsDirMonitorThread(void *ud)
               filepath, MAX_PATH - 1, NULL, NULL);
           filepath[count] = TEXT('\0');
 
+          if (notify == NULL)
+          {
+            continue;
+          }
           Raw_Event *ev = &mon->rawEvents[mon->rawEventsUsed++];
           ev->action = notify->Action;
           ev->skip = false;
@@ -283,6 +317,7 @@ FsDirMonitorThread(void *ud)
 
       RefreshWatches(mon);
     }
+
     if (mon->rawEventsUsed > 0)
     {
       ProcessRawEvents(mon);

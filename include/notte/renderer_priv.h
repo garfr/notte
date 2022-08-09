@@ -20,10 +20,16 @@
 
 /* === TYPES === */
 
+typedef enum
+{
+  RENDER_PASS_GBUFFER,
+  RENDER_PASS_COUNT,
+} Render_Pass;
+
 struct Static_Mesh
 {
-  const Vertex *verts;
-  const u16 *indices;
+  const Static_Vert *verts;
+  const u32 *indices;
   usize nVerts, nIndices;
   VkBuffer vertexBuffer, indexBuffer;
   VkDeviceMemory vertexMemory, indexMemory;
@@ -85,12 +91,51 @@ typedef struct
 
 typedef struct
 {
+  Technique *techs[RENDER_PASS_COUNT];
+} Effect;
+
+typedef struct
+{
+  Dict *dict;
+} Effect_Manager;
+
+struct Material
+{
+  Effect *effect;
+  VkDescriptorSet descriptors[RENDER_PASS_COUNT];
+};
+
+typedef struct
+{
+  Dict *dict;
+} Material_Manager;
+
+typedef struct
+{
+  bool isSwapchain;
+  VkFramebuffer fbs[MAX_FRAMES_IN_FLIGHT];
+} Render_Graph_Texture;
+
+typedef void (*Render_Graph_Record_Fn)(Renderer *ren, VkCommandBuffer buffer);
+
+typedef struct
+{
+  Vector writes, reads;
+  Render_Graph_Record_Fn fn;
+  int mark; /* For topological sort. */
+} Render_Graph_Pass;
+
+typedef struct
+{
+  Renderer *ren;
   VkCommandPool commandPool;
   VkCommandBuffer commandBuffers[MAX_FRAMES_IN_FLIGHT];
   VkSemaphore imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT];
   VkSemaphore renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT];
   VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];
+  Render_Graph_Texture swap;
   VkFramebuffer *swapFbs;
+  Vector passes, bakedPasses;
 } Render_Graph;
 
 struct Camera 
@@ -114,6 +159,7 @@ typedef struct
     {
       Static_Mesh *staticMesh;
       Transform transform;
+      Material *material;
     };
   };
 } Draw_Call;
@@ -147,6 +193,8 @@ struct Renderer
 
   Shader_Manager shaders;
   Technique_Manager techs;
+  Effect_Manager effects;
+  Material_Manager materials;
   Render_Graph graph;
 
   Static_Mesh *mesh;
@@ -155,6 +203,15 @@ struct Renderer
 
   VkBuffer uniformBuffers[MAX_FRAMES_IN_FLIGHT];
   VkDeviceMemory uniformMemory[MAX_FRAMES_IN_FLIGHT];
+
+  VkImage texture;
+  VkDeviceMemory textureMemory;
+  VkImageView textureView;
+  VkSampler textureSampler;
+
+  VkImage depthImage;
+  VkDeviceMemory depthMemory;
+  VkImageView depthView;
 
   Vector drawCalls;
 

@@ -1,361 +1,244 @@
 /*
  * Copyright (c) 2022 Gavin Ratcliff
  *
- * Loads Wavefront .OBJ files. 
+ * Obj file loading.
  */
 
-#include <stdarg.h>
-#include <stdio.h>
-
 #include <notte/model.h>
-#include <notte/log.h>
+#include <notte/error.h>
+#include <notte/vector.h>
 
-/* === CONSTANTS === */
-
-#define MAX_VERTS_PER_FACE 3
+#define TINYOBJ_LOADER_C_IMPLEMENTATION
+#include <tinyobj_loader_c.h>
 
 /* === TYPES === */
 
 typedef struct
 {
-  int nothing;
-} Parser;
-
-typedef struct
-{
-  usize nPos, nNor, nTex, nVerts;
-} Size_Data;
-
-typedef struct 
-{
-  enum
-  {
-    OBJ_CMD_V,
-    OBJ_CMD_VT,
-    OBJ_CMD_VN,
-    OBJ_CMD_F,
-  } t;
-
-  union
-  {
-    f32 v[3];
-    struct
-    {
-      u32 pos[MAX_VERTS_PER_FACE];
-      u32 nor[MAX_VERTS_PER_FACE];
-      u32 tex[MAX_VERTS_PER_FACE];
-      u32 verts;
-    } indices;
-  };
-} Obj_Cmd;
+  Vector verts;
+  Vector indices;
+} Mesh_Data;
 
 /* === PROTOTYPES === */
 
-static usize CountCmds(Membuf buf);
-static Err_Code ParseCmds(Membuf buf, Parse_Result *result, Obj_Cmd *cmds, 
-    Size_Data *size);
-static f32 ReadFloat(usize *pos_out, Membuf buf);
-static u32 ReadInt(usize *pos_out, Membuf buf);
-static void FormatErr(Parse_Result *result, const char *fmt, ...);
+static Err_Code ObjLoadMeshData(Allocator alloc, Parse_Result *result, 
+    Membuf inBuf, Mesh_Data *data);
+static void GetFileData(void *ctx, const char *filename, const int is_mtl, 
+    const char *obj_filename, char **data, size_t *len);
+static Err_Code CreateStaticMeshFromData(Static_Mesh **mesh, Mesh_Data *data, 
+    Renderer *ren, Allocator alloc);
 
-/* === PUBLIC FUNCTIONS === */
-
-static bool
-StaticVertEqual(Static_Vert v1, Static_Vert v2)
-{
-  return Vec3Equal(v1.pos, v2.pos) && Vec3Equal(v1.nor, v2.nor) 
-    && Vec2Equal(v1.tex, v2.tex);
-}
+/* === PUBLIC FUNCTION === */
 
 Err_Code 
-StaticModelLoadObj(Allocator alloc,
-                   Static_Model *model, 
-                   Parse_Result *result, 
-                   Membuf buf)
+StaticMeshLoadObj(Renderer *ren, 
+                  Allocator alloc, 
+                  Static_Mesh **mesh, 
+                  Parse_Result *result, 
+                  Membuf buf)
 {
   Err_Code err;
-  Size_Data size;
-  usize nCmds = CountCmds(buf);
-
-  Obj_Cmd *cmds = NEW_ARR(alloc, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
-
-  err = ParseCmds(buf, result, cmds, &size);
+  Mesh_Data data;
+  err = ObjLoadMeshData(alloc, result, buf, &data);
   if (err)
   {
-    FREE_ARR(alloc, cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
     return err;
   }
 
-  Vec3 *pos = NEW_ARR(alloc, Vec3, size.nPos, MEMORY_TAG_ARRAY);
-  Vec3 *nor = NEW_ARR(alloc, Vec3, size.nNor, MEMORY_TAG_ARRAY);
-  Vec2 *tex = NEW_ARR(alloc, Vec2, size.nTex, MEMORY_TAG_ARRAY);
-  Static_Vert *verts = NEW_ARR(alloc, Static_Vert, size.nVerts, 
-      MEMORY_TAG_ARRAY);
-  u32 *indices = NEW_ARR(alloc, u32, size.nVerts, MEMORY_TAG_ARRAY);
-  usize posIdx = 0, norIdx = 0, texIdx = 0, vertIdx = 0, indicesIdx = 0;
-
-  for (usize i = 0; i < nCmds; i++)
+  err = CreateStaticMeshFromData(mesh, &data, ren, alloc);
+  if (err)
   {
-    Obj_Cmd *cmd = &cmds[i];
-    switch (cmd->t)
-    {
-      case OBJ_CMD_V:
-        Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2], pos[posIdx++]);
-        break;
-      case OBJ_CMD_VN:
-        Vec3Create(cmd->v[0], cmd->v[1], cmd->v[2], nor[norIdx++]);
-        break;
-      case OBJ_CMD_VT:
-        Vec2Create(cmd->v[0], cmd->v[1], tex[texIdx++]);
-        break;
-      case OBJ_CMD_F:
-      {
-        for (u32 i = 0; i < cmd->indices.verts; i++)
-        {
-          Static_Vert vert;
-          Vec3Copy(pos[cmd->indices.pos[i] - 1], vert.pos);
-          Vec3Copy(nor[cmd->indices.nor[i] - 1], vert.nor);
-          Vec2Copy(tex[cmd->indices.tex[i] - 1], vert.tex);
-          for (usize j = 0; j < vertIdx; j++)
-          {
-            if (StaticVertEqual(vert, verts[j]))
-            {
-              indices[indicesIdx++] = j;
-              goto skip;
-            }
-          }
-          verts[vertIdx] = vert;
-          indices[indicesIdx++] = vertIdx++;
-skip:
-          continue;
-        }
-        break;
-      }
-    }
+    return err;
+  }
+  
+  return ERR_OK;
+}
+
+static Err_Code
+CreateStaticMeshFromData(Static_Mesh **mesh, 
+                         Mesh_Data *data, 
+                         Renderer *ren, 
+                         Allocator alloc)
+{
+  Err_Code err;
+
+  Static_Mesh_Create_Info createInfo = 
+  {
+    .verts = (Static_Vert *) data->verts.buf,
+    .nVerts = data->verts.elemsUsed,
+    .indices = (u32 *) data->indices.buf,
+    .nIndices = data->indices.elemsUsed,
+  };
+
+  err = RendererCreateStaticMesh(ren, &createInfo, mesh);
+  if (err)
+  { 
+    return err;
   }
 
-  FREE_ARR(alloc, cmds, Obj_Cmd, nCmds, MEMORY_TAG_ARRAY);
-  FREE_ARR(alloc, pos, Vec3, size.nPos, MEMORY_TAG_ARRAY);
-  FREE_ARR(alloc, nor, Vec3, size.nNor, MEMORY_TAG_ARRAY);
-  FREE_ARR(alloc, tex, Vec2, size.nTex, MEMORY_TAG_ARRAY);
-
-  Static_Shape *shape = NEW_ARR(alloc, Static_Shape, 1, MEMORY_TAG_ARRAY);
-  verts = RESIZE_ARR(alloc, verts, Static_Vert, size.nVerts, vertIdx, 
-      MEMORY_TAG_ARRAY);
-  shape->name = "obj";
-  shape->indices = indices;
-  shape->nIndices = size.nVerts;
-  shape->verts = verts;
-  shape->nVerts = vertIdx;
-
-  model->nShapes = 1;
-  model->shapes = shape;
+  VectorDestroy(&data->verts, alloc);
+  VectorDestroy(&data->indices, alloc);
 
   return ERR_OK;
 }
 
-/* === PRIVATE FUNCTIONS === */
-
-static usize 
-CountCmds(Membuf buf)
+Err_Code 
+ConvertObjToUStatic(Allocator alloc, 
+                    Membuf inBuf, 
+                    Membuf *outBuf)
 {
-  usize count = 0;
+  Mesh_Data data;
+  Parse_Result result;
+  Err_Code err;
 
-  usize pos = 0;
-  while (pos < buf.size)
+  err = ObjLoadMeshData(alloc, &result, inBuf, &data);
+  if (err)
   {
-    if (buf.data[pos] != '#')
-    {
-      count++;
-    }
-    while (buf.data[pos] != '\n')
-    {
-      pos++;
-    }
-    pos++;
+    return err;
   }
-  return count;
+
+  usize outSize = 2 * sizeof(u64) + data.verts.elemsUsed 
+    * sizeof(Static_Vert) + data.indices.elemsUsed* sizeof(u32);
+  u8 *buf = NEW_ARR(alloc, u8, outSize + 1, MEMORY_TAG_MEMBUF);
+  usize idx = 0;
+
+  MemoryCopy(idx + buf, &data.verts.elemsUsed, sizeof(u64));
+  idx += sizeof(u64);
+  MemoryCopy(idx + buf, &data.indices.elemsUsed, sizeof(u64));
+  idx += sizeof(u64);
+
+  MemoryCopy(idx + buf, data.verts.buf, data.verts.elemsUsed * sizeof(Static_Vert));
+  idx += data.verts.elemsUsed * sizeof(Static_Vert);
+  MemoryCopy(idx + buf, data.indices.buf, data.indices.elemsUsed * sizeof(u32));
+  idx+= data.indices.elemsUsed * sizeof(u32);
+
+  outBuf->data = buf;
+  outBuf->size = outSize;
+
+  VectorDestroy(&data.verts, alloc);
+  VectorDestroy(&data.indices, alloc);
+
+  return ERR_OK;
 }
 
-static u32 
-ReadInt(usize *pos_out, 
-        Membuf buf)
+Err_Code 
+StaticMeshLoadUStatic(Renderer *ren, 
+                      Allocator alloc,
+                      Static_Mesh **mesh, 
+                      Parse_Result *result, 
+                      Membuf buf)
 {
-  usize pos = *pos_out;
-  u32 total = 0;
-  bool neg = false;
+  Err_Code err;
 
-  while (isspace(buf.data[pos]))
+  const u8 *ptr = buf.data;
+
+  u64 vertCount = *((u64*) ptr);
+  ptr += sizeof(u64);
+  u64 indexCount = *((u64*) ptr);
+  ptr += sizeof(u64);
+
+  Static_Vert *verts = NEW_ARR(alloc, Static_Vert, vertCount, MEMORY_TAG_ARRAY);
+  u32 *indices = NEW_ARR(alloc, u32, indexCount, MEMORY_TAG_ARRAY);
+
+  MemoryCopy(verts, ptr, sizeof(Static_Vert) * vertCount);
+  ptr += sizeof(Static_Vert) * vertCount;
+  MemoryCopy(indices, ptr, sizeof(u32) * indexCount);
+
+  Static_Mesh_Create_Info createInfo = 
   {
-    pos++;
+    .verts = verts,
+    .nVerts = vertCount,
+    .indices = indices,
+    .nIndices = indexCount, 
+  };
+
+  err = RendererCreateStaticMesh(ren, &createInfo, mesh);
+  if (err)
+  { 
+    return err;
   }
 
-  while (isdigit(buf.data[pos]))
-  {
-    total *= 10;
-    total += buf.data[pos] - '0';
-    pos++;
-  }
+  FREE_ARR(alloc, verts, Static_Vert, vertCount, MEMORY_TAG_ARRAY);
+  FREE_ARR(alloc, indices, u32, indexCount, MEMORY_TAG_ARRAY);
 
-  *pos_out = pos;
-  return total;
+  return ERR_OK;
 }
 
-static f32
-ReadFloat(usize *pos_out, 
-          Membuf buf)
+/* === PRIVATE FUNCTION === */
+
+static void 
+GetFileData(void *ctx, 
+            const char *filename,
+            const int is_mtl, 
+            const char *obj_filename, 
+            char **data, 
+            size_t *len)
 {
-  usize pos = *pos_out;
-  float total = 0.0f;
-  bool neg = false;
+  Membuf *buf = ctx;
 
-  while (isspace(buf.data[pos]))
-  {
-    pos++;
-  }
-
-  if (buf.data[pos] == '-')
-  {
-    neg = true;
-    pos++;
-  }
-
-  while (isdigit(buf.data[pos]))
-  {
-    total *= 10.0f;
-    total += (float) (buf.data[pos] - '0');
-    pos++;
-  }
-
-  if (buf.data[pos] == '.')
-  {
-    pos++;
-    float mult = 0.1f;
-    while (isdigit(buf.data[pos]))
-    {
-      total += ((float) (buf.data[pos] - '0')) * mult;
-      mult /= 10.0;
-      pos++;
-    }
-  }
-
-  if (neg)
-  {
-    total *= -1.0f;
-  }
-
-  *pos_out = pos;
-  return total;
+  *data = (char *) buf->data;
+  *len = buf->size;
 }
 
 static Err_Code 
-ParseCmds(Membuf buf, 
-          Parse_Result *result, 
-          Obj_Cmd *cmds,
-          Size_Data *size)
+ObjLoadMeshData(Allocator alloc, 
+                Parse_Result *result, 
+                Membuf inBuf, 
+                Mesh_Data *data)
 {
-  usize cmdPos = 0;
-  usize pos = 0;
-  size->nPos = size->nNor = size->nTex = size->nVerts = 0;
+  usize numShapes, numMaterials;
+  tinyobj_attrib_t attrib;
+  tinyobj_shape_t *shapes = NULL;
+  tinyobj_material_t *materials = NULL;
+  Err_Code err;
 
-  while (pos < buf.size)
+  int ret = tinyobj_parse_obj(&attrib, &shapes, &numShapes, &materials,
+      &numMaterials, "bunny2.obj", GetFileData, &inBuf, TINYOBJ_FLAG_TRIANGULATE);
+  if (ret != TINYOBJ_SUCCESS)
   {
-    if (buf.data[pos] == '#')
-    {
-      while (buf.data[pos] != '\n')
-      {
-        pos++;
-      }
-      pos++;
-      continue;
-    }
-    switch (buf.data[pos])
-    {
-      case 'v':
-      {
-        pos++;
-        switch (buf.data[pos])
-        {
-          case ' ':
-          {
-            Obj_Cmd *cmd = &cmds[cmdPos++];
-            cmd->t = OBJ_CMD_V;
-            cmd->v[0] = ReadFloat(&pos, buf);
-            cmd->v[1] = ReadFloat(&pos, buf);
-            cmd->v[2] = ReadFloat(&pos, buf);
-            size->nPos++;
-            break;
-          }
-          case 'n':
-          {
-            pos++;
-            Obj_Cmd *cmd = &cmds[cmdPos++];
-            cmd->t = OBJ_CMD_VN;
-            cmd->v[0] = ReadFloat(&pos, buf);
-            cmd->v[1] = ReadFloat(&pos, buf);
-            cmd->v[2] = ReadFloat(&pos, buf);
-            size->nNor++;
-            break;
-          }
-          case 't':
-          {
-            pos++;
-            Obj_Cmd *cmd = &cmds[cmdPos++];
-            cmd->t = OBJ_CMD_VT;
-            cmd->v[0] = ReadFloat(&pos, buf);
-            cmd->v[1] = ReadFloat(&pos, buf);
-            size->nTex++;
-            break;
-          }
-        }
-        break;
-      }
-      case 'f':
-      {
-        Obj_Cmd *cmd = &cmds[cmdPos++];
-        cmd->t = OBJ_CMD_F;
-        usize vert = 0;
-        pos++;
-        pos++; /* Skip the space. */
-        cmd->indices.verts = 0;
+    return ERR_LIBRARY_FAILURE;
+  }
 
-        while (buf.data[pos] != '\n')
-        {
-          cmd->indices.verts++;
-          size->nVerts++;
-          cmd->indices.pos[vert] = ReadInt(&pos, buf);
-          pos++;
-          cmd->indices.tex[vert] = ReadInt(&pos, buf);
-          pos++;
-          cmd->indices.nor[vert] = ReadInt(&pos, buf);
-          vert++;
-          pos++; /* Skip the space. */
-        }
+  data->verts = VECTOR_CREATE(alloc, Static_Vert);
+  data->indices = VECTOR_CREATE(alloc, u32);
 
-        break;
-      }
+  for (usize i = 0; i < attrib.num_faces; i++)
+  {
+    int vIdx = 3 * attrib.faces[i].v_idx;
+    int nIdx = 3 * attrib.faces[i].vn_idx;
+    Static_Vert vert = {
+      {
+        attrib.vertices[vIdx + 0],
+        attrib.vertices[vIdx + 1],
+        attrib.vertices[vIdx + 2],
+      },
+      {
+        attrib.normals[nIdx + 0],
+        attrib.normals[nIdx + 1],
+        attrib.normals[nIdx + 2],
+      },
+      {
+        0.0f, 0.0f,
+      },
+    };
 
-      default:
-        FormatErr(result, "unknown .obj command '%c'", buf.data[pos]);
-        return ERR_FAILED_PARSE;
-    }
-    while (buf.data[pos] != '\n')
+    for (u32 j = 0; j < data->verts.elemsUsed; j++)
     {
-      pos++;
+      Static_Vert *tVert = VectorIdx(&data->verts, j);
+      if (Vec3Equal(vert.pos, tVert->pos) &&
+          Vec3Equal(vert.nor, tVert->nor) &&
+          Vec2Equal(vert.tex, tVert->tex))
+      {
+        VectorPush(&data->indices, alloc, &j);
+        goto skipCreate;
+      }
     }
-    pos++;
+    u32 newIdx = data->verts.elemsUsed;
+    VectorPush(&data->verts, alloc, &vert);
+    VectorPush(&data->indices, alloc, &newIdx);
+  skipCreate:
+    ;
   }
 
   return ERR_OK;
-}
-
-static void 
-FormatErr(Parse_Result *result, 
-          const char *fmt, 
-          ...)
-{
-  va_list args;
-  va_start(args, fmt);
-
-  vsnprintf(result->msg, PARSE_RESULT_MAX_MSG, fmt, args);
 }

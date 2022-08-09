@@ -10,9 +10,15 @@
 #include <notte/renderer_priv.h>
 
 Err_Code RenderGraphInit(Renderer *ren, Render_Graph *graph);
-void RenderGraphDeinit(Renderer *ren, Render_Graph *graph);
-void RenderGraphRecord(Renderer *ren, Render_Graph *graph,
+void RenderGraphDeinit(Render_Graph *graph);
+void RenderGraphRecord(Render_Graph *graph,
                   u32 imageIndex);
-Err_Code RenderGraphRebuild(Renderer *ren, Render_Graph *graph);
+
+Render_Graph_Texture *RenderGraphGetSwapchainTexture(Render_Graph *graph);
+Err_Code RenderGraphCreatePass(Render_Graph *graph, Render_Graph_Pass **passOut);
+Err_Code RenderGraphWriteTexture(Render_Graph *graph, Render_Graph_Pass *pass,
+    Render_Graph_Texture *tex);
+
+Err_Code RenderGraphRebuild(Render_Graph *graph);
 
 #endif /* NOTTE_RENDER_GRAPH_H */

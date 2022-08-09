@@ -15,4 +15,10 @@ Err_Code CreateBuffer(Renderer *ren, VkDeviceSize size,
 void DestroyBuffer(Renderer *ren, VkBuffer buffer, 
     VkDeviceMemory memory);
 
+Err_Code CreateImage(Renderer *ren, u32 w, u32 h, VkFormat format, 
+    VkImageTiling tiling, VkImageUsageFlags usage, 
+    VkMemoryPropertyFlags properties, VkImage *image, 
+    VkDeviceMemory *imageMemory);
+void DestroyImage(Renderer *ren, VkImage image, VkDeviceMemory memory);
+
 #endif  /* NOTTE_VK_MEM_H */
